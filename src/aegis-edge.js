@@ -76,9 +76,27 @@
  *     // for a pending-review item returned via onPendingReview(item):
  *     guard.resolveReview(item.id, 'confirm');   // -> counts as a warning
  *     guard.resolveReview(item.id, 'dismiss');   // -> treated as allowed
+ *
+ * MODEL SWAPPING: any of the four models can be overridden via the `models`
+ * option — see `_resolveModelSpec` and `DEFAULT_MODELS` below. Each entry is
+ * either 'default'/omitted (unchanged behavior), a Hugging Face Hub id
+ * (loaded from the Hub), or a local path (loaded with `local_files_only`).
+ * The text model is no longer assumed binary — see `_maxToxicityScore`.
  */
 
 export class AegisEdge {
+  static DEFAULT_MODELS = {
+    text: { id: 'multilingual-toxicity', options: { quantized: true, local_files_only: true } },
+    image: { id: 'onnx-community/nsfw_image_detection-ONNX', options: {} },
+    audioTranscription: { id: 'Xenova/whisper-tiny.en', options: {} },
+    audioEmotion: { id: 'onnx-community/wav2vec2-base-Speech_Emotion_Recognition-ONNX', options: {} },
+  };
+
+  // Labels that must never be read as a toxicity score, whatever else the
+  // model reports alongside them (e.g. a multi-label model with a 'clean'
+  // catch-all bucket next to its abuse labels).
+  static NEUTRAL_LABELS = new Set(['neutral', 'clean', 'non-toxic', 'nontoxic', 'not-toxic', 'not_toxic']);
+
   constructor(opts = {}) {
     this.channelContext = opts.channelContext ?? 'public';
     this.lowThreshold = opts.lowThreshold ?? 0.55;
@@ -104,10 +122,40 @@ export class AegisEdge {
     this._imgClassifier = null;
     this._audioTranscriber = null;
     this._audioEmotionClassifier = null;
-    this._readyPromise = this._loadModels(opts.transformersUrl);
+    this._readyPromise = this._loadModels(opts.transformersUrl, opts.models);
   }
 
-  async _loadModels(transformersUrl = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2') {
+  /**
+   * True if `id` looks like a local filesystem path rather than a Hugging
+   * Face Hub id: leading './', '../', '/', '~/', a 'file:' URL, or a
+   * Windows drive letter (e.g. 'C:\'). A bare 'org/model' or single-segment
+   * name (both valid Hub ids) is never treated as local.
+   */
+  _isLocalPath(id) {
+    return /^(\.{1,2}\/|\/|~\/|file:)/.test(id) || /^[a-zA-Z]:[\\/]/.test(id);
+  }
+
+  /**
+   * Resolves one of the four model slots ('text' | 'image' |
+   * 'audioTranscription' | 'audioEmotion') against an optional override
+   * from the `models` constructor option. 'default'/undefined/null keeps
+   * the built-in model and its options unchanged; any other string is
+   * treated as either a Hub id or a local path (see `_isLocalPath`) and
+   * loaded with no assumptions beyond that — any transformers.js-compatible
+   * model works.
+   */
+  _resolveModelSpec(kind, override) {
+    const def = AegisEdge.DEFAULT_MODELS[kind];
+    if (override === undefined || override === null || override === 'default') {
+      return { id: def.id, options: { ...def.options } };
+    }
+    return {
+      id: override,
+      options: this._isLocalPath(override) ? { local_files_only: true } : {},
+    };
+  }
+
+  async _loadModels(transformersUrl = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2', modelsConfig = {}) {
     const { pipeline, env, RawImage } = await import(transformersUrl);
     env.allowLocalModels = true;
     // The multilingual toxicity model is built locally by
@@ -116,11 +164,17 @@ export class AegisEdge {
     // Resolved relative to this file: src/ -> ../models/
     env.localModelPath = new URL('../models/', import.meta.url).href;
     this._RawImage = RawImage;
+
+    const textSpec = this._resolveModelSpec('text', modelsConfig.text);
+    const imageSpec = this._resolveModelSpec('image', modelsConfig.image);
+    const transcriptionSpec = this._resolveModelSpec('audioTranscription', modelsConfig.audioTranscription);
+    const emotionSpec = this._resolveModelSpec('audioEmotion', modelsConfig.audioEmotion);
+
     const [text, img, transcriber, emotion] = await Promise.all([
-      pipeline('text-classification', 'multilingual-toxicity', { quantized: true, local_files_only: true }),
-      pipeline('image-classification', 'onnx-community/nsfw_image_detection-ONNX'),
-      pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en'),
-      pipeline('audio-classification', 'onnx-community/wav2vec2-base-Speech_Emotion_Recognition-ONNX'),
+      pipeline('text-classification', textSpec.id, textSpec.options),
+      pipeline('image-classification', imageSpec.id, imageSpec.options),
+      pipeline('automatic-speech-recognition', transcriptionSpec.id, transcriptionSpec.options),
+      pipeline('audio-classification', emotionSpec.id, emotionSpec.options),
     ]);
     this._textClassifier = text;
     this._imgClassifier = img;
@@ -264,17 +318,35 @@ export class AegisEdge {
   }
 
   /**
-   * The bundled multilingual model (converted from textdetox's 15-language
-   * classifier) is BINARY: 'neutral' vs 'toxic', softmax over the two (they
-   * sum to 1). Unlike the earlier English-only toxic-bert (6 independent
-   * labels), there's no ambiguity here — just read the 'toxic' label's
-   * score directly. Kept as a named helper (not inlined) so the trigger
-   * label is still recorded consistently with the rest of the SDK.
+   * Works with both shapes a text-classification model may return:
+   *   - BINARY (e.g. the bundled multilingual model): 'neutral' vs 'toxic',
+   *     softmax over the two. The 'toxic'/'toxicity' label's score is used
+   *     directly.
+   *   - MULTI-LABEL (e.g. the classic 6-label toxic-bert: toxic,
+   *     severe_toxic, obscene, threat, insult, identity_hate): if no
+   *     single 'toxic'/'toxicity' label is present, the max score across
+   *     all abuse-type labels is used instead, and `_lastToxicLabel`
+   *     records which one triggered it (surfaced as `triggerLabel`).
+   * An explicit neutral/clean label (see `NEUTRAL_LABELS`) is never itself
+   * read as a toxicity score, in either shape.
    */
   _maxToxicityScore(labelResults) {
-    const toxicEntry = labelResults.find(r => r.label.toLowerCase() === 'toxic');
-    this._lastToxicLabel = toxicEntry ? 'toxic' : (labelResults[0]?.label ?? 'unknown');
-    return toxicEntry?.score ?? 0;
+    const candidates = labelResults.filter(r => !AegisEdge.NEUTRAL_LABELS.has(r.label.toLowerCase()));
+
+    const explicitToxic = candidates.find(r => /^toxic(ity)?$/i.test(r.label));
+    if (explicitToxic) {
+      this._lastToxicLabel = explicitToxic.label.toLowerCase();
+      return explicitToxic.score;
+    }
+
+    if (candidates.length === 0) {
+      this._lastToxicLabel = labelResults[0]?.label ?? 'unknown';
+      return 0;
+    }
+
+    const top = candidates.reduce((max, r) => (r.score > max.score ? r : max), candidates[0]);
+    this._lastToxicLabel = top.label.toLowerCase();
+    return top.score;
   }
 
   async _route(score, inputHash, modality, policyId, triggerLabel = null) {
