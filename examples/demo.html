@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Aegis Edge v4 — SDK-Powered Demo</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #10141a; --card: #0f1318; --border: rgba(255,255,255,.12);
+    --text: rgba(255,255,255,.94); --muted: rgba(255,255,255,.62); --subtle: rgba(255,255,255,.45);
+    --ok: #00f0ff; --warn: #ffae00; --danger: #ff4848; --info: #3b82f6; --human: #a78bfa;
+    --font-mono: 'SF Mono','Roboto Mono',Consolas,monospace; --font-sans: 'Inter',ui-sans-serif,system-ui,sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: var(--font-sans); background:#000; color:var(--text); -webkit-font-smoothing:antialiased;
+    display:flex; justify-content:center; min-height:100vh; padding:32px 16px; }
+  .wrap { width:100%; max-width:960px; }
+  .container { background: radial-gradient(1200px 700px at 20% 0%, rgba(59,130,246,.08), transparent 55%),
+    radial-gradient(900px 600px at 90% 20%, rgba(0,240,255,.04), transparent 60%), var(--bg);
+    border:1px solid var(--border); border-radius:20px; box-shadow:0 40px 80px rgba(0,0,0,.6); overflow:hidden; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:20px 24px; border-bottom:1px solid var(--border); }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .logo { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,var(--ok),var(--info));
+    display:flex; align-items:center; justify-content:center; font-weight:700; color:#000; }
+  .brandText .name { font-weight:700; font-size:15px; }
+  .brandText .tag { font-size:11px; letter-spacing:.08em; color:var(--muted); font-family:var(--font-mono); }
+  .modelStates { font-family:var(--font-mono); font-size:11px; color:var(--muted); text-align:right; }
+  .modelStates .dot { width:7px; height:7px; border-radius:50%; display:inline-block; margin-right:6px; background:var(--warn); }
+  .modelStates.ready .dot { background:var(--ok); }
+
+  .body { padding:24px; display:grid; gap:20px; }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:18px; }
+  .panelTitle { font-size:12px; letter-spacing:.06em; color:var(--muted); text-transform:uppercase; margin-bottom:12px; font-family:var(--font-mono); display:flex; justify-content:space-between; align-items:center; }
+
+  .contextSwitch { display:flex; gap:10px; margin-bottom:16px; }
+  .ctxBtn { flex:1; padding:14px; border-radius:12px; border:1px solid var(--border); background:rgba(255,255,255,.03); cursor:pointer; text-align:left; }
+  .ctxBtn .ctxTitle { font-weight:700; font-size:13px; }
+  .ctxBtn .ctxSub { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.4; }
+  .ctxBtn.active { border-color: var(--ok); background: rgba(0,240,255,.08); }
+  .ctxBtn.active.private { border-color: var(--danger); background: rgba(255,72,72,.08); }
+  .privateNotice { display:none; background:rgba(255,72,72,.1); border:1px solid rgba(255,72,72,.35); border-radius:12px; padding:16px; margin-bottom:16px; font-size:13px; line-height:1.6; }
+  .privateNotice.show { display:block; }
+  .privateNotice b { color:var(--danger); }
+
+  .tabs { display:flex; gap:8px; margin-bottom:16px; }
+  .tabBtn { padding:10px 16px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,.03); cursor:pointer; font-size:13px; font-weight:600; color:var(--muted); }
+  .tabBtn.active { color:var(--text); border-color:var(--ok); background:rgba(0,240,255,.08); }
+  .tabPane { display:none; }
+  .tabPane.active { display:block; }
+
+  .chatMessages { min-height:80px; max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
+  .msg { padding:10px 12px; border-radius:10px; background:rgba(255,255,255,.03); border:1px solid var(--border); font-size:14px; }
+  .msg.blocked { border-color: rgba(255,72,72,.4); background: rgba(255,72,72,.06); }
+  .msg.pending { border-color: rgba(167,139,250,.4); background: rgba(167,139,250,.06); }
+  .msg .metaRow { display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:11px; color:var(--subtle); margin-top:6px; }
+  .msg img.thumb { max-width:120px; border-radius:8px; display:block; margin-bottom:8px; }
+  .msg.blocked img.thumb, .msg.pending img.thumb { filter: blur(18px); }
+
+  .inputRow { display:flex; gap:8px; }
+  input[type=text] { flex:1; background:rgba(255,255,255,.04); border:1px solid var(--border); border-radius:10px; padding:12px 14px; color:var(--text); font-size:14px; outline:none; }
+  input[type=text]:focus { border-color: var(--ok); }
+  input:disabled { opacity:.35; }
+  button { background:rgba(0,240,255,.15); border:1px solid rgba(0,240,255,.4); color:var(--text); border-radius:10px; padding:12px 18px; font-size:14px; cursor:pointer; font-weight:600; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.ghost { background:rgba(255,255,255,.05); border-color:var(--border); }
+  button.small { padding:8px 12px; font-size:12px; }
+
+  .dropzone { border:2px dashed var(--border); border-radius:12px; padding:28px; text-align:center; cursor:pointer; color:var(--muted); font-size:13px; }
+  .dropzone.drag { border-color:var(--ok); color:var(--text); }
+  .dropzone input { display:none; }
+
+  .note { font-size:12px; color:var(--subtle); line-height:1.5; margin-top:6px; }
+
+  .statusGrid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  .statBox { background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:10px; padding:12px; text-align:center; }
+  .statBox .num { font-size:20px; font-weight:700; font-family:var(--font-mono); }
+  .statBox .lbl { font-size:10px; color:var(--muted); margin-top:4px; }
+  .statBox.warnState .num { color:var(--warn); }
+  .statBox.blockState .num { color:var(--danger); }
+  .statBox.humanState .num { color:var(--human); }
+
+  .queueItem { border:1px solid rgba(167,139,250,.35); background:rgba(167,139,250,.05); border-radius:10px; padding:12px; margin-bottom:10px; }
+  .queueItem img.qThumb { max-width:140px; border-radius:8px; filter: blur(14px); display:block; margin-bottom:8px; }
+  .queueItem .qText { font-size:14px; margin-bottom:8px; }
+  .queueItem .qMeta { font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-bottom:10px; }
+  .queueActions { display:flex; gap:8px; }
+  .queueEmpty { font-size:13px; color:var(--subtle); text-align:center; padding:20px; }
+
+  .proofLog { font-family:var(--font-mono); font-size:11px; color:var(--subtle); max-height:140px; overflow-y:auto; }
+  .proofLog .entry { padding:6px 0; border-bottom:1px dashed var(--border); }
+  .proofLog .entry .hash { color:var(--ok); }
+  .proofLog .entry .human-tag { color:var(--human); }
+  .proofLog .entry .img-tag { color:var(--info); }
+
+  .banBanner { background:rgba(255,72,72,.12); border:1px solid rgba(255,72,72,.4); border-radius:10px; padding:12px; font-size:13px; margin-top:12px; display:none; }
+  .banBanner.show { display:block; }
+
+  .architectureNote { font-size:12px; color:var(--muted); line-height:1.6; }
+  .architectureNote b { color:var(--text); }
+  .architectureNote code { color:var(--ok); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="logo">S</div>
+        <div class="brandText">
+          <div class="name">Aegis Edge v4</div>
+          <div class="tag">Same UI as v3 — now 100% driven by aegis-edge.js</div>
+        </div>
+      </div>
+      <div id="modelStates" class="modelStates"><span class="dot"></span><span id="modelText">Loading SDK + models…</span></div>
+    </header>
+
+    <div class="body">
+      <div class="panel">
+        <div class="panelTitle">Step 1 — Channel Context</div>
+        <div class="contextSwitch">
+          <div id="ctxPublic" class="ctxBtn active">
+            <div class="ctxTitle">🌐 Public / Group — ToS covers monitoring</div>
+            <div class="ctxSub">Analysis allowed.</div>
+          </div>
+          <div id="ctxPrivate" class="ctxBtn">
+            <div class="ctxTitle">🔒 Private 1:1 — no monitoring consent</div>
+            <div class="ctxSub">Disabled entirely — enforced inside the SDK, not just this UI.</div>
+          </div>
+        </div>
+        <div id="privateNotice" class="privateNotice">
+          <b>Analysis disabled.</b> <code>guard.checkText()</code> / <code>guard.checkImage()</code> return <code>null</code> immediately without ever calling a model, because <code>channelContext === 'private'</code>.
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panelTitle">Step 2 — Content</div>
+        <div class="tabs">
+          <div id="tabTextBtn" class="tabBtn active">💬 Text</div>
+          <div id="tabImgBtn" class="tabBtn">🖼️ Image</div>
+        </div>
+        <div id="tabText" class="tabPane active">
+          <div id="chatMessages" class="chatMessages"></div>
+          <div class="inputRow">
+            <input id="chatInput" type="text" placeholder="Type a message and press Send…" disabled />
+            <button id="btnSend" disabled>Send</button>
+          </div>
+        </div>
+        <div id="tabImg" class="tabPane">
+          <div id="imgMessages" class="chatMessages"></div>
+          <div id="dropzone" class="dropzone">Click or drop an image — analyzed on-device via the SDK<input id="fileInput" type="file" accept="image/*" /></div>
+        </div>
+        <div id="banBanner" class="banBanner">3-warning cap reached — <code>guard.isBlocked()</code> is now true.</div>
+      </div>
+
+      <div class="panel">
+        <div class="panelTitle">Step 3 — Human Review Queue <span id="queueCount" style="color:var(--human)">0 pending</span></div>
+        <div id="queueList"><div class="queueEmpty">No ambiguous cases pending.</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="panelTitle">Enforcement Status — from <code>guard.getStats()</code></div>
+        <div class="statusGrid">
+          <div class="statBox"><div class="num" id="statChecked">0</div><div class="lbl">Checked</div></div>
+          <div class="statBox warnState"><div class="num" id="statWarnings">0 / 3</div><div class="lbl">Warnings</div></div>
+          <div class="statBox blockState"><div class="num" id="statBlocked">0</div><div class="lbl">Blocked</div></div>
+          <div class="statBox humanState"><div class="num" id="statPending">0</div><div class="lbl">Pending Review</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panelTitle">Decision Log — every entry came from <code>guard.onDecision</code></div>
+        <div id="proofLog" class="proofLog"><div class="entry">Waiting for first item…</div></div>
+      </div>
+
+      <div class="panel architectureNote">
+        <b>What changed from v3:</b> this page has zero detection logic. Every score, threshold check, review routing, warning count, and proof hash comes from a single imported <code>AegisEdge</code> instance. This file is purely presentation — swap it for any UI and the underlying behavior (including the private-channel hard gate) stays identical, because it lives in the SDK, not in a page's script tag.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import { AegisEdge } from '../src/aegis-edge.js';
+
+  const chatMessages = document.getElementById('chatMessages');
+  const imgMessages = document.getElementById('imgMessages');
+  const chatInput = document.getElementById('chatInput');
+  const btnSend = document.getElementById('btnSend');
+  const modelText = document.getElementById('modelText');
+  const modelStates = document.getElementById('modelStates');
+  const proofLog = document.getElementById('proofLog');
+  const banBanner = document.getElementById('banBanner');
+  const ctxPublic = document.getElementById('ctxPublic');
+  const ctxPrivate = document.getElementById('ctxPrivate');
+  const privateNotice = document.getElementById('privateNotice');
+  const queueList = document.getElementById('queueList');
+  const queueCount = document.getElementById('queueCount');
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const tabTextBtn = document.getElementById('tabTextBtn');
+  const tabImgBtn = document.getElementById('tabImgBtn');
+  const tabText = document.getElementById('tabText');
+  const tabImg = document.getElementById('tabImg');
+  const statChecked = document.getElementById('statChecked');
+  const statWarnings = document.getElementById('statWarnings');
+  const statBlocked = document.getElementById('statBlocked');
+  const statPending = document.getElementById('statPending');
+
+  const pendingDom = new Map(); // reviewId -> { itemEl, msgDiv }
+
+  function refreshStats() {
+    const s = guard.getStats();
+    statChecked.textContent = s.checked;
+    statWarnings.textContent = `${s.warnings} / ${s.maxWarnings}`;
+    statBlocked.textContent = s.blocked;
+    statPending.textContent = s.pendingReview;
+    queueCount.textContent = `${s.pendingReview} pending`;
+    if (s.isBlocked) {
+      banBanner.classList.add('show');
+      chatInput.disabled = true; btnSend.disabled = true;
+    }
+  }
+
+  function logLine(r) {
+    if (proofLog.children[0]?.textContent === 'Waiting for first item…') proofLog.innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'entry';
+    const tag = r.source === 'human' ? '<span class="human-tag">[human]</span> ' : '';
+    const mTag = r.modality === 'image' ? '<span class="img-tag">[image]</span> ' : '[text] ';
+    div.innerHTML = `<span class="hash">${r.proofHash.slice(0,16)}…</span> — ${mTag}${tag}${r.decision} (score ${r.score.toFixed(3)})`;
+    proofLog.prepend(div);
+  }
+
+  const guard = new AegisEdge({
+    channelContext: 'public',
+    onDecision: (r) => { logLine(r); refreshStats(); },
+    onPendingReview: (item) => addToQueue(item),
+    onWarningThresholdReached: () => refreshStats(),
+  });
+
+  guard.ready().then(() => {
+    modelText.textContent = 'SDK ready (text, image + audio models loaded)';
+    modelStates.classList.add('ready');
+    chatInput.disabled = false; btnSend.disabled = false;
+  }).catch(e => { modelText.textContent = 'Failed to load — check network/CDN access'; console.error(e); });
+
+  // ---- context switch ----
+  ctxPublic.addEventListener('click', () => setContext(true));
+  ctxPrivate.addEventListener('click', () => setContext(false));
+  function setContext(isPublic) {
+    guard.setChannelContext(isPublic ? 'public' : 'private');
+    ctxPublic.classList.toggle('active', isPublic);
+    ctxPrivate.classList.toggle('active', !isPublic);
+    ctxPrivate.classList.toggle('private', !isPublic);
+    privateNotice.classList.toggle('show', !isPublic);
+    const enabled = isPublic && !guard.isBlocked();
+    chatInput.disabled = !enabled; btnSend.disabled = !enabled;
+  }
+
+  // ---- tabs ----
+  tabTextBtn.addEventListener('click', () => { tabTextBtn.classList.add('active'); tabImgBtn.classList.remove('active'); tabText.classList.add('active'); tabImg.classList.remove('active'); });
+  tabImgBtn.addEventListener('click', () => { tabImgBtn.classList.add('active'); tabTextBtn.classList.remove('active'); tabImg.classList.add('active'); tabText.classList.remove('active'); });
+
+  // ---- text ----
+  function addTextMessage(text, decision, score, extraClass='') {
+    const div = document.createElement('div');
+    div.className = 'msg' + (extraClass ? ' ' + extraClass : '');
+    div.innerHTML = `<div>${text.replace(/</g,'&lt;')}</div><div class="metaRow"><span>score: ${score.toFixed(3)}</span><span>${decision}</span></div>`;
+    chatMessages.appendChild(div); chatMessages.scrollTop = chatMessages.scrollHeight;
+    return div;
+  }
+
+  async function handleSend() {
+    const text = chatInput.value.trim();
+    if (!text) return;
+    chatInput.value = ''; btnSend.disabled = true;
+    const result = await guard.checkText(text);
+    if (result) {
+      const div = addTextMessage(text, result.decision, result.score, result.decision === 'BLOCKED' ? 'blocked' : result.decision === 'PENDING_REVIEW' ? 'pending' : '');
+      if (result.reviewId) pendingDom.set(result.reviewId, { msgDiv: div });
+    }
+    if (!guard.isBlocked()) btnSend.disabled = false;
+  }
+  btnSend.addEventListener('click', handleSend);
+  chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleSend(); });
+
+  // ---- image ----
+  dropzone.addEventListener('click', () => fileInput.click());
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+  dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+  dropzone.addEventListener('drop', (e) => { e.preventDefault(); dropzone.classList.remove('drag'); if (e.dataTransfer.files[0]) handleImage(e.dataTransfer.files[0]); });
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleImage(fileInput.files[0]); fileInput.value=''; });
+
+  function addImgMessage(blobUrl, decision, score, extraClass='') {
+    const div = document.createElement('div');
+    div.className = 'msg' + (extraClass ? ' ' + extraClass : '');
+    div.innerHTML = `<img class="thumb" src="${blobUrl}"><div class="metaRow"><span>score: ${score.toFixed(3)}</span><span>${decision}</span></div>`;
+    imgMessages.appendChild(div); imgMessages.scrollTop = imgMessages.scrollHeight;
+    return div;
+  }
+
+  async function handleImage(file) {
+    const result = await guard.checkImage(file);
+    if (result) {
+      const div = addImgMessage(result.blobUrl, result.decision, result.score, result.decision === 'BLOCKED' ? 'blocked' : result.decision === 'PENDING_REVIEW' ? 'pending' : '');
+      if (result.reviewId) pendingDom.set(result.reviewId, { msgDiv: div });
+    }
+  }
+
+  // ---- review queue ----
+  function addToQueue(item) {
+    if (queueList.querySelector('.queueEmpty')) queueList.innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'queueItem';
+    el.innerHTML = `<div class="qMeta">[${item.modality}] score: ${item.score.toFixed(3)} — review band</div>
+      <div class="queueActions"><button class="small">Confirm as warning</button><button class="small ghost">Dismiss (allow)</button></div>`;
+    const [confirmBtn, dismissBtn] = el.querySelectorAll('button');
+    confirmBtn.addEventListener('click', async () => {
+      await guard.resolveReview(item.id, 'confirm');
+      el.remove(); refreshQueueEmpty();
+      const dom = pendingDom.get(item.id);
+      if (dom) { dom.msgDiv.classList.remove('pending'); dom.msgDiv.classList.add('blocked'); }
+    });
+    dismissBtn.addEventListener('click', async () => {
+      await guard.resolveReview(item.id, 'dismiss');
+      el.remove(); refreshQueueEmpty();
+      const dom = pendingDom.get(item.id);
+      if (dom) { dom.msgDiv.classList.remove('pending'); dom.msgDiv.querySelector('.metaRow span:last-child').textContent = 'ALLOWED (human)'; }
+    });
+    queueList.appendChild(el);
+    refreshQueueEmpty();
+  }
+  function refreshQueueEmpty() {
+    if (!queueList.children.length) queueList.innerHTML = '<div class="queueEmpty">No ambiguous cases pending.</div>';
+  }
+</script>
+</body>
+</html>

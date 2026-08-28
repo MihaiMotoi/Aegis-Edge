@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Aegis Edge SDK — Integrator Example</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background:#0b0d10; color:#eee; padding:32px; max-width:720px; margin:0 auto; }
+  h1 { font-size:18px; } h2 { font-size:13px; color:#9aa; margin-top:28px; }
+  input, button { font-size:14px; padding:8px 10px; border-radius:8px; border:1px solid #333; background:#181c22; color:#eee; }
+  button { cursor:pointer; }
+  #log { font-family: monospace; font-size:12px; white-space:pre-wrap; background:#111; padding:12px; border-radius:8px; max-height:300px; overflow:auto; }
+  .review { border:1px solid #a78bfa55; background:#a78bfa11; padding:10px; border-radius:8px; margin-top:8px; }
+  select { background:#181c22; color:#eee; border:1px solid #333; border-radius:8px; padding:6px; }
+</style>
+</head>
+<body>
+<h1>Integrator example — wiring the standalone Aegis Edge SDK</h1>
+<p style="color:#9aa;font-size:13px">
+  This page contains no Aegis Edge UI code of its own — every safety decision below comes from
+  <code>aegis-edge.js</code>, imported as a plain ES module.
+</p>
+
+<h2>CHANNEL CONTEXT</h2>
+<select id="ctx">
+  <option value="public">public (monitoring allowed)</option>
+  <option value="private">private (monitoring disabled)</option>
+</select>
+
+<h2>TEXT CHECK</h2>
+<input id="textInput" placeholder="type something…" style="width:70%" />
+<button id="sendBtn">Check</button>
+
+<h2>PENDING HUMAN REVIEWS</h2>
+<div id="reviews"><em style="color:#666">none yet</em></div>
+
+<h2>DECISION LOG</h2>
+<div id="log"></div>
+
+<script type="module">
+  import { AegisEdge } from '../src/aegis-edge.js';
+
+  const log = document.getElementById('log');
+  const reviews = document.getElementById('reviews');
+  const ctxSelect = document.getElementById('ctx');
+  const textInput = document.getElementById('textInput');
+  const sendBtn = document.getElementById('sendBtn');
+
+  function line(s) { log.textContent = `[${new Date().toLocaleTimeString()}] ${s}\n` + log.textContent; }
+
+  const guard = new AegisEdge({
+    channelContext: 'public',
+    onDecision: (r) => line(`${r.modality} → ${r.decision} (score ${r.score.toFixed(3)}, proof ${r.proofHash.slice(0,12)}…, source ${r.source})`),
+    onPendingReview: (item) => {
+      const div = document.createElement('div');
+      div.className = 'review';
+      div.innerHTML = `pending: score ${item.score.toFixed(3)} — <button data-a="confirm">confirm warning</button> <button data-a="dismiss">dismiss</button>`;
+      div.querySelectorAll('button').forEach(b => b.addEventListener('click', async () => {
+        await guard.resolveReview(item.id, b.dataset.a);
+        div.remove();
+        if (!reviews.children.length) reviews.innerHTML = '<em style="color:#666">none yet</em>';
+      }));
+      if (reviews.querySelector('em')) reviews.innerHTML = '';
+      reviews.appendChild(div);
+    },
+    onWarningThresholdReached: () => line('*** 3-warning cap reached — SDK will now return null on every check ***'),
+  });
+
+  line('loading models…');
+  guard.ready().then(() => line('models ready.'));
+
+  ctxSelect.addEventListener('change', () => {
+    guard.setChannelContext(ctxSelect.value);
+    line(`channel context set to "${ctxSelect.value}"`);
+  });
+
+  sendBtn.addEventListener('click', async () => {
+    const text = textInput.value.trim();
+    if (!text) return;
+    textInput.value = '';
+    const result = await guard.checkText(text);
+    if (result === null) line(`(no-op — private channel or warning cap reached)`);
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Aegis Edge — Moderator Dashboard</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background:#0b0d10; color:#eee; margin:0; padding:24px; max-width:900px; margin:0 auto; }
+  h1 { font-size:18px; } h2 { font-size:13px; color:#9aa; text-transform:uppercase; letter-spacing:.05em; margin-top:28px; }
+  input, button { font-size:14px; padding:8px 10px; border-radius:8px; border:1px solid #333; background:#181c22; color:#eee; }
+  button { cursor:pointer; }
+  .panel { background:#10141a; border:1px solid #222; border-radius:12px; padding:16px; margin-top:10px; }
+  .item { border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:8px; font-size:13px; }
+  .item .meta { color:#9aa; font-family:monospace; font-size:11px; margin-bottom:6px; }
+  .actions { display:flex; gap:8px; margin-top:8px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; font-family:monospace; }
+  td, th { border-bottom:1px solid #222; padding:6px 4px; text-align:left; }
+  #loginBox { max-width:320px; }
+  .hide { display:none; }
+  .pill { padding:2px 6px; border-radius:6px; font-size:11px; }
+  .pill.ALLOWED, .pill.ALLOWED_BY_HUMAN { background:#0f3; color:#000; }
+  .pill.BLOCKED, .pill.WARNED_BY_HUMAN { background:#f44; color:#000; }
+  .pill.PENDING_REVIEW { background:#a78bfa; color:#000; }
+</style>
+</head>
+<body>
+<h1>Aegis Edge — Moderator Dashboard</h1>
+
+<div id="loginBox" class="panel">
+  <h2>Login</h2>
+  <input id="email" placeholder="email" value="admin@aegis-edge.local" style="width:100%;margin-bottom:8px" /><br/>
+  <input id="password" type="password" placeholder="password" value="changeme123" style="width:100%;margin-bottom:8px" /><br/>
+  <button id="loginBtn">Log in</button>
+  <div id="loginErr" style="color:#f66;font-size:12px;margin-top:6px"></div>
+</div>
+
+<div id="app" class="hide">
+  <h2>Pending Review Queue <span id="queueCount"></span></h2>
+  <div id="queue" class="panel">Loading…</div>
+
+  <h2>Recent Decisions (proof log)</h2>
+  <div class="panel">
+    <table id="logTable"><thead><tr><th>id</th><th>user</th><th>modality</th><th>decision</th><th>score</th><th>source</th><th>proof hash</th><th>when</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:8787';
+let token = null;
+
+document.getElementById('loginBtn').addEventListener('click', async () => {
+  const email = document.getElementById('email').value;
+  const password = document.getElementById('password').value;
+  const res = await fetch(`${API}/api/auth/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email,password}) });
+  if (!res.ok) { document.getElementById('loginErr').textContent = 'Login failed'; return; }
+  const data = await res.json();
+  token = data.token;
+  document.getElementById('loginBox').classList.add('hide');
+  document.getElementById('app').classList.remove('hide');
+  refresh();
+});
+
+async function refresh() {
+  const [queueRes, logRes] = await Promise.all([
+    fetch(`${API}/api/queue`, { headers: { Authorization: `Bearer ${token}` } }),
+    fetch(`${API}/api/decisions?limit=30`, { headers: { Authorization: `Bearer ${token}` } }),
+  ]);
+  const { queue } = await queueRes.json();
+  const { decisions } = await logRes.json();
+
+  document.getElementById('queueCount').textContent = `(${queue.length} pending)`;
+  const q = document.getElementById('queue');
+  q.innerHTML = queue.length ? '' : '<i style="color:#666">No pending items.</i>';
+  queue.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'item';
+    div.innerHTML = `<div class="meta">[${item.modality}] user: ${item.user_ref} — score ${item.score.toFixed(3)} — ${item.created_at}</div>
+      <div class="actions">
+        <button data-id="${item.id}" data-a="confirm">Confirm as warning</button>
+        <button data-id="${item.id}" data-a="dismiss">Dismiss (allow)</button>
+      </div>`;
+    div.querySelectorAll('button').forEach(b => b.addEventListener('click', async () => {
+      await fetch(`${API}/api/queue/${b.dataset.id}/resolve`, {
+        method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`},
+        body: JSON.stringify({ action: b.dataset.a })
+      });
+      refresh();
+    }));
+    q.appendChild(div);
+  });
+
+  const tbody = document.querySelector('#logTable tbody');
+  tbody.innerHTML = '';
+  decisions.forEach(d => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${d.id}</td><td>${d.user_ref}</td><td>${d.modality}</td>
+      <td><span class="pill ${d.decision}">${d.decision}</span></td>
+      <td>${d.score.toFixed(3)}</td><td>${d.source}</td>
+      <td title="${d.proof_hash}">${d.proof_hash.slice(0,14)}…</td><td>${d.created_at}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+setInterval(() => { if (token) refresh(); }, 5000);
+</script>
+</body>
+</html>

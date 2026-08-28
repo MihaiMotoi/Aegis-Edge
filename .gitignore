@@ -1,0 +1,24 @@
+# Models are built locally by scripts/setup-models.sh — too large for git
+models/multilingual-toxicity/
+
+# Dependencies
+node_modules/
+
+# Local database created at runtime
+server/*.db
+server/*.db-shm
+server/*.db-wal
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Env
+.env
+.env.local

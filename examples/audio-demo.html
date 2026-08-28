@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Aegis Edge — Audio Module Test</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background:#0b0d10; color:#eee; padding:24px; max-width:760px; margin:0 auto; }
+  h1 { font-size:18px; } h2 { font-size:13px; color:#9aa; text-transform:uppercase; letter-spacing:.05em; margin-top:24px; }
+  .panel { background:#10141a; border:1px solid #222; border-radius:12px; padding:16px; margin-top:8px; }
+  button { font-size:14px; padding:10px 16px; border-radius:8px; border:1px solid #333; background:#181c22; color:#eee; cursor:pointer; }
+  button.rec { border-color:#f44; }
+  button.rec.active { background:#f44; color:#000; }
+  input[type=file] { color:#eee; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .result { font-family:monospace; font-size:12px; white-space:pre-wrap; background:#111; padding:12px; border-radius:8px; margin-top:10px; }
+  .transcript { font-size:14px; margin-top:8px; padding:8px; background:#181c22; border-radius:8px; }
+  .scoreBar { height:8px; background:#222; border-radius:4px; overflow:hidden; margin-top:4px; }
+  .scoreBar .fill { height:100%; background:#00f0ff; }
+  .scoreLabel { font-size:11px; color:#9aa; display:flex; justify-content:space-between; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>Aegis Edge — Audio Module (checkAudio)</h1>
+<p style="color:#9aa;font-size:13px">Record or upload a short clip. Transcription (Whisper) + text toxicity + vocal-tone all run locally via the SDK. Nothing is uploaded anywhere.</p>
+
+<div class="panel">
+  <div id="modelState">Loading audio models…</div>
+</div>
+
+<h2>Input</h2>
+<div class="panel row">
+  <button id="recBtn" class="rec" disabled>● Record</button>
+  <span>or</span>
+  <input id="fileInput" type="file" accept="audio/*" disabled />
+</div>
+
+<h2>Result</h2>
+<div class="panel">
+  <div id="transcript" class="transcript" style="display:none"></div>
+  <div id="scores" style="display:none">
+    <div class="scoreLabel"><span>content toxicity (from transcript)</span><span id="contentVal"></span></div>
+    <div class="scoreBar"><div id="contentBar" class="fill" style="width:0%"></div></div>
+    <div class="scoreLabel"><span>vocal tone (anger/disgust)</span><span id="toneVal"></span></div>
+    <div class="scoreBar"><div id="toneBar" class="fill" style="width:0%"></div></div>
+  </div>
+  <div id="decision" class="result">No audio checked yet.</div>
+</div>
+
+<script type="module">
+  import { AegisEdge } from '../src/aegis-edge.js';
+
+  const modelState = document.getElementById('modelState');
+  const recBtn = document.getElementById('recBtn');
+  const fileInput = document.getElementById('fileInput');
+  const decisionEl = document.getElementById('decision');
+  const transcriptEl = document.getElementById('transcript');
+  const scoresEl = document.getElementById('scores');
+  const contentBar = document.getElementById('contentBar');
+  const toneBar = document.getElementById('toneBar');
+  const contentVal = document.getElementById('contentVal');
+  const toneVal = document.getElementById('toneVal');
+
+  const guard = new AegisEdge({
+    channelContext: 'public',
+    onDecision: (r) => { if (r.modality !== 'audio') return; },
+    onPendingReview: (item) => { decisionEl.textContent += `\n\n[sent to human review queue: score ${item.score.toFixed(3)}]`; },
+  });
+
+  guard.ready().then(() => {
+    modelState.textContent = 'Models ready.';
+    recBtn.disabled = false;
+    fileInput.disabled = false;
+  }).catch(e => { modelState.textContent = 'Failed to load models: ' + e.message; console.error(e); });
+
+  async function processClip(blob) {
+    decisionEl.textContent = 'Analyzing…';
+    transcriptEl.style.display = 'none';
+    scoresEl.style.display = 'none';
+    const result = await guard.checkAudio(blob);
+    if (!result) { decisionEl.textContent = '(no-op — private channel or warning cap reached)'; return; }
+
+    transcriptEl.style.display = 'block';
+    transcriptEl.textContent = result.transcript ? `"${result.transcript}"` : '(no speech detected)';
+
+    scoresEl.style.display = 'block';
+    contentBar.style.width = `${Math.round(result.contentScore * 100)}%`;
+    toneBar.style.width = `${Math.round(result.toneScore * 100)}%`;
+    contentVal.textContent = result.contentScore.toFixed(3);
+    toneVal.textContent = result.toneScore.toFixed(3);
+
+    decisionEl.textContent =
+      `decision: ${result.decision}\ncombined score: ${result.score.toFixed(3)}\nproof hash: ${result.proofHash.slice(0,24)}…`;
+  }
+
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) processClip(fileInput.files[0]); });
+
+  let mediaRecorder, chunks = [];
+  recBtn.addEventListener('click', async () => {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      chunks = [];
+      mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        processClip(blob);
+        stream.getTracks().forEach(t => t.stop());
+      };
+      mediaRecorder.start();
+      recBtn.textContent = '■ Stop';
+      recBtn.classList.add('active');
+    } else {
+      mediaRecorder.stop();
+      recBtn.textContent = '● Record';
+      recBtn.classList.remove('active');
+    }
+  });
+</script>
+</body>
+</html>
