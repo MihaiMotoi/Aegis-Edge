@@ -159,3 +159,213 @@ describe('setChannelContext', () => {
     assert.equal(guard.channelContext, 'public', 'an invalid value must not partially apply');
   });
 });
+
+describe('model swapping — _resolveModelSpec', () => {
+  test('"default" and omitted both resolve to the built-in model + options, per slot', () => {
+    const guard = createGuard();
+    for (const override of [undefined, 'default']) {
+      assert.deepEqual(guard._resolveModelSpec('text', override), {
+        id: 'multilingual-toxicity',
+        options: { quantized: true, local_files_only: true },
+      });
+      assert.deepEqual(guard._resolveModelSpec('image', override), {
+        id: 'onnx-community/nsfw_image_detection-ONNX',
+        options: {},
+      });
+      assert.deepEqual(guard._resolveModelSpec('audioTranscription', override), {
+        id: 'Xenova/whisper-tiny.en',
+        options: {},
+      });
+      assert.deepEqual(guard._resolveModelSpec('audioEmotion', override), {
+        id: 'onnx-community/wav2vec2-base-Speech_Emotion_Recognition-ONNX',
+        options: {},
+      });
+    }
+  });
+
+  test('a Hugging Face Hub id (with or without an org prefix) is loaded from the Hub — no local_files_only', () => {
+    const guard = createGuard();
+    assert.deepEqual(guard._resolveModelSpec('text', 'organizatie/modelul-meu'), {
+      id: 'organizatie/modelul-meu',
+      options: {},
+    });
+    // Single-segment ids (e.g. 'gpt2') are also valid Hub ids, not local paths.
+    assert.deepEqual(guard._resolveModelSpec('text', 'my-standalone-model'), {
+      id: 'my-standalone-model',
+      options: {},
+    });
+  });
+
+  test('a local path (./, ../, /, ~/, file:, or a Windows drive letter) is loaded with local_files_only: true', () => {
+    const guard = createGuard();
+    const localPaths = [
+      './models/my-model',
+      '../shared-models/my-model',
+      '/opt/models/my-model',
+      '~/models/my-model',
+      'file:///opt/models/my-model',
+      'C:\\models\\my-model',
+    ];
+    for (const p of localPaths) {
+      assert.deepEqual(guard._resolveModelSpec('image', p), { id: p, options: { local_files_only: true } });
+    }
+  });
+
+  test('an override applies independently per model slot, leaving the others at their defaults', () => {
+    const guard = createGuard();
+    const textSpec = guard._resolveModelSpec('text', 'organizatie/modelul-meu');
+    const imageSpec = guard._resolveModelSpec('image', 'default');
+    assert.equal(textSpec.id, 'organizatie/modelul-meu');
+    assert.equal(imageSpec.id, 'onnx-community/nsfw_image_detection-ONNX');
+  });
+});
+
+describe('model swapping — _loadModels end-to-end (data: URL mock of transformers.js)', () => {
+  test('constructs pipeline() calls with the resolved id/options for each model slot, honoring the models config', async () => {
+    // A real `import(transformersUrl)` still runs here — data: URLs are
+    // valid ES module specifiers in Node — it's only the *content* being
+    // imported that's a mock, so this exercises the actual _loadModels
+    // code path (env setup, _resolveModelSpec wiring, Promise.all), not a
+    // stand-in for it.
+    const mockModuleSrc = `
+      export function pipeline(task, id, options) {
+        globalThis.__aegisMockCalls.push({ task, id, options });
+        return Promise.resolve({ task, id });
+      }
+      export const env = {};
+      export class RawImage {}
+    `;
+    const dataUrl = 'data:text/javascript,' + encodeURIComponent(mockModuleSrc);
+    globalThis.__aegisMockCalls = [];
+
+    const guard = new AegisEdge({
+      transformersUrl: dataUrl,
+      models: {
+        text: 'organizatie/modelul-meu', // Hub id -> loaded from Hub, no local_files_only
+        image: 'default',
+        audioTranscription: './local-models/whisper-custom', // local path -> local_files_only
+        // audioEmotion omitted -> default
+      },
+    });
+
+    await guard.ready();
+    const calls = globalThis.__aegisMockCalls;
+    delete globalThis.__aegisMockCalls;
+
+    assert.equal(calls.length, 4);
+
+    const textCall = calls.find(c => c.task === 'text-classification');
+    assert.equal(textCall.id, 'organizatie/modelul-meu');
+    assert.deepEqual(textCall.options, {});
+
+    const imageCall = calls.find(c => c.task === 'image-classification');
+    assert.equal(imageCall.id, 'onnx-community/nsfw_image_detection-ONNX');
+    assert.deepEqual(imageCall.options, {});
+
+    const transcriptionCall = calls.find(c => c.task === 'automatic-speech-recognition');
+    assert.equal(transcriptionCall.id, './local-models/whisper-custom');
+    assert.deepEqual(transcriptionCall.options, { local_files_only: true });
+
+    const emotionCall = calls.find(c => c.task === 'audio-classification');
+    assert.equal(emotionCall.id, 'onnx-community/wav2vec2-base-Speech_Emotion_Recognition-ONNX');
+    assert.deepEqual(emotionCall.options, {});
+  });
+
+  test('with no `models` option at all, every slot loads its default id/options unchanged', async () => {
+    const mockModuleSrc = `
+      export function pipeline(task, id, options) {
+        globalThis.__aegisMockCalls2.push({ task, id, options });
+        return Promise.resolve({ task, id });
+      }
+      export const env = {};
+      export class RawImage {}
+    `;
+    const dataUrl = 'data:text/javascript,' + encodeURIComponent(mockModuleSrc);
+    globalThis.__aegisMockCalls2 = [];
+
+    const guard = new AegisEdge({ transformersUrl: dataUrl });
+    await guard.ready();
+    const calls = globalThis.__aegisMockCalls2;
+    delete globalThis.__aegisMockCalls2;
+
+    const textCall = calls.find(c => c.task === 'text-classification');
+    assert.equal(textCall.id, 'multilingual-toxicity');
+    assert.deepEqual(textCall.options, { quantized: true, local_files_only: true });
+  });
+});
+
+describe('_maxToxicityScore — binary model (bundled default shape)', () => {
+  test('reads the explicit "toxic" label directly, ignoring "neutral"', () => {
+    const guard = createGuard();
+    const score = guard._maxToxicityScore([{ label: 'toxic', score: 0.82 }, { label: 'neutral', score: 0.18 }]);
+    assert.equal(score, 0.82);
+    assert.equal(guard._lastToxicLabel, 'toxic');
+  });
+
+  test('"toxicity" (not just "toxic") is also recognized as the explicit label', () => {
+    const guard = createGuard();
+    const score = guard._maxToxicityScore([{ label: 'toxicity', score: 0.6 }, { label: 'clean', score: 0.4 }]);
+    assert.equal(score, 0.6);
+    assert.equal(guard._lastToxicLabel, 'toxicity');
+  });
+});
+
+describe('_maxToxicityScore — multi-label model (e.g. 6-label toxic-bert style)', () => {
+  test('with no explicit toxic/toxicity label, takes the max across abuse labels and reports which triggered', () => {
+    const guard = createGuard();
+    const score = guard._maxToxicityScore([
+      { label: 'insult', score: 0.31 },
+      { label: 'threat', score: 0.87 },
+      { label: 'obscene', score: 0.12 },
+      { label: 'identity_hate', score: 0.05 },
+    ]);
+    assert.equal(score, 0.87);
+    assert.equal(guard._lastToxicLabel, 'threat');
+  });
+
+  test('a neutral/clean label is never picked as the toxicity score, even if it has the highest raw score', () => {
+    const guard = createGuard();
+    const score = guard._maxToxicityScore([
+      { label: 'insult', score: 0.2 },
+      { label: 'threat', score: 0.1 },
+      { label: 'neutral', score: 0.95 },
+    ]);
+    assert.equal(score, 0.2);
+    assert.equal(guard._lastToxicLabel, 'insult');
+  });
+
+  test('an explicit "toxic" label present alongside specific abuse labels wins over the max (matches binary-model semantics)', () => {
+    const guard = createGuard();
+    const score = guard._maxToxicityScore([
+      { label: 'toxic', score: 0.5 },
+      { label: 'severe_toxic', score: 0.05 },
+      { label: 'obscene', score: 0.9 }, // higher, but 'toxic' takes priority
+      { label: 'threat', score: 0.1 },
+      { label: 'insult', score: 0.2 },
+      { label: 'identity_hate', score: 0.05 },
+    ]);
+    assert.equal(score, 0.5);
+    assert.equal(guard._lastToxicLabel, 'toxic');
+  });
+
+  test('all-neutral results score 0 rather than picking a neutral label as toxicity', () => {
+    const guard = createGuard();
+    const score = guard._maxToxicityScore([{ label: 'clean', score: 0.99 }, { label: 'non-toxic', score: 0.01 }]);
+    assert.equal(score, 0);
+  });
+});
+
+describe('model swapping — end to end with a mock multi-label classifier', () => {
+  test('checkText routes on the max abuse label and surfaces it as triggerLabel', async () => {
+    const guard = createGuard({ channelContext: 'public', lowThreshold: 0.55, highThreshold: 0.9 });
+    guard._textClassifier = async () => [
+      { label: 'insult', score: 0.3 },
+      { label: 'threat', score: 0.95 },
+      { label: 'obscene', score: 0.1 },
+      { label: 'identity_hate', score: 0.05 },
+    ];
+    const result = await guard.checkText('some text');
+    assert.equal(result.decision, 'BLOCKED');
+    assert.equal(result.triggerLabel, 'threat');
+  });
+});

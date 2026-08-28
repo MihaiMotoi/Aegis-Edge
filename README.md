@@ -114,6 +114,40 @@ const guard = new AegisEdge({
 });
 ```
 
+## Bring your own model
+
+Any of the four models can be overridden via the `models` option:
+
+```js
+const guard = new AegisEdge({
+  models: {
+    text: 'organizatie/modelul-meu',   // Hugging Face Hub id or a local path
+    image: 'default',
+    audioTranscription: 'default',
+    audioEmotion: 'default',
+  },
+});
+```
+
+- `'default'` or an omitted key keeps the built-in model — unchanged behavior.
+- A Hugging Face Hub id (e.g. `'org/model-name'`) is loaded from the Hub.
+- A local path (`./`, `../`, `/`, `~/`, `file:`, or a Windows drive letter)
+  is loaded from disk via `local_files_only`.
+
+Any [transformers.js](https://github.com/xenova/transformers.js)-compatible
+model works — the SDK makes no assumption about it beyond the task it's
+loaded for (text-classification, image-classification,
+automatic-speech-recognition, audio-classification).
+
+For text specifically, the model no longer has to be binary
+(`toxic`/`neutral`). If it's multi-label (e.g. a `toxic-bert`-style model
+with `insult`, `threat`, `obscene`, `identity_hate`, etc.), Aegis Edge takes
+the max score across the abuse labels and reports which one triggered it via
+`triggerLabel`. If the model does expose an explicit `toxic`/`toxicity`
+label, that's used directly instead. Either way, an explicit neutral label
+(`neutral`, `clean`, `non-toxic`, …) is never itself read as a toxicity
+score.
+
 ## Examples
 
 | File | What it shows |
