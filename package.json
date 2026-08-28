@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "setup": "./scripts/setup-models.sh",
-    "serve": "npx serve ."
+    "serve": "npx serve .",
+    "test": "node --test test/*.test.js"
   },
   "keywords": [
     "content-moderation",

@@ -8,6 +8,7 @@ Text, image, and audio moderation that runs entirely in the browser.
 No content ever leaves the user's device — only a decision and a hash do.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![CI](https://github.com/MihaiMotoi/Aegis-Edge/actions/workflows/test.yml/badge.svg)](https://github.com/MihaiMotoi/Aegis-Edge/actions/workflows/test.yml)
 
 </div>
 
@@ -162,6 +163,16 @@ Image NSFW detection and the audio vocal-tone signal are language-independent.
   CSAM), your compliance process should be the recipient. Aegis Edge is
   designed to be the *trigger*, never the custodian of such evidence.
 - **Production secrets management** in the reference server.
+
+## Running tests
+
+The SDK's decision logic (routing, thresholds, warning counter, private-channel
+gate, proof hashing) is covered by unit tests that inject mock classifiers —
+no model download required, runs in under a second.
+
+```bash
+npm test
+```
 
 ## Contributing
 
