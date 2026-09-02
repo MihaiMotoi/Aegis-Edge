@@ -172,9 +172,11 @@ export class SifEdge {
     // (a moderator action, another tab/device for the same userRef) while
     // the page stays open; without it, only a fresh construction would ever
     // see it. Without a backend there's nowhere to persist a real duration,
-    // so it's a simplified local counter instead: 3 strikes blocks that
-    // modality until the page reloads, no timed expiry, no escalation
-    // levels, and no re-check needed since nothing external can change it.
+    // so it's a simplified local counter instead — see _registerWarning and
+    // _warningThreshold for the actual per-modality thresholds (class
+    // docstring above has the full breakdown): no timed expiry, no
+    // escalation levels, and no re-check needed since nothing external can
+    // change it.
     this._modalityBanStatus = { text: null, audio: null, image: null };
     this._banStatusFetchedAt = 0; // epoch ms of the last successful hydration; 0 = never fetched
     this._banStatusInFlight = null; // in-flight hydration promise, shared by concurrent callers
