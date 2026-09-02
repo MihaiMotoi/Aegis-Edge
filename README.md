@@ -14,6 +14,19 @@ No content ever leaves the user's device — only a decision and a hash do.
 
 ---
 
+## See it in action
+
+Type an insult, get an instant `BLOCKED` decision with a score. Drop in an
+ordinary photo, get `ALLOWED`. Every check lands in the decision log below,
+with a proof hash and the running warning count.
+
+![SifEdge demo: a message gets checked and BLOCKED with a score, then an image gets checked and ALLOWED](examples/demo.gif)
+
+*Illustrative — the UI and flow are real, but this GIF plays back sample
+decisions rather than live model output (recording live inference wasn't
+possible in the environment this was generated in). Run
+[`examples/demo.html`](examples/demo.html) yourself to see the real thing.*
+
 ## What it does
 
 SifEdge checks user-generated content for abuse and returns a decision your
