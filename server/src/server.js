@@ -1,10 +1,17 @@
+import './env-check.js'; // must run first — see comment in that file
 import express from 'express';
 import cors from 'cors';
 import db from './db.js';
-import { login, requireAuth } from './auth.js';
+import { login, requireAuth, requireIngestKey } from './auth.js';
 
 const app = express();
-app.use(cors());
+
+// CORS: default to same-origin only. Set ALLOWED_ORIGINS (comma-separated)
+// to the integrator's real domain(s) before deploying. An open CORS policy
+// here would let any website's script call the moderator API endpoints
+// from a logged-in moderator's browser.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean);
+app.use(cors(allowedOrigins.length ? { origin: allowedOrigins } : { origin: false }));
 app.use(express.json());
 
 const MAX_WARNINGS = 3;
@@ -17,7 +24,10 @@ const MAX_WARNINGS = 3;
 // the SDK, and this endpoint has no field for it at all, so there is nothing
 // here that could accidentally store raw content even by mistake.
 // ---------------------------------------------------------------------------
-app.post('/api/decisions', (req, res) => {
+const VALID_DECISIONS = new Set(['ALLOWED', 'PENDING_REVIEW', 'BLOCKED', 'WARNED_BY_HUMAN', 'ALLOWED_BY_HUMAN']);
+const VALID_MODALITIES = new Set(['text', 'image', 'audio']);
+
+app.post('/api/decisions', requireIngestKey, (req, res) => {
   const { userRef, channelContext, modality, decision, score, inputHash, proofHash, source, policyId, externalId } = req.body || {};
 
   if (channelContext === 'private') {
@@ -25,6 +35,18 @@ app.post('/api/decisions', (req, res) => {
   }
   if (!userRef || !modality || !decision || score === undefined || !inputHash || !proofHash || !policyId) {
     return res.status(400).json({ error: 'missing required fields' });
+  }
+  // Reject anything outside the shapes the SDK actually produces. Without
+  // this, a caller with a valid ingest key could still write garbage
+  // decision/modality values that break downstream queue and stats logic.
+  if (!VALID_DECISIONS.has(decision)) {
+    return res.status(400).json({ error: `decision must be one of: ${[...VALID_DECISIONS].join(', ')}` });
+  }
+  if (!VALID_MODALITIES.has(modality)) {
+    return res.status(400).json({ error: `modality must be one of: ${[...VALID_MODALITIES].join(', ')}` });
+  }
+  if (typeof score !== 'number' || score < 0 || score > 1 || Number.isNaN(score)) {
+    return res.status(400).json({ error: 'score must be a number between 0 and 1' });
   }
 
   const info = db.prepare(`
@@ -134,5 +156,12 @@ function registerWarning(userRef) {
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-const PORT = process.env.PORT || 8787;
-app.listen(PORT, () => console.log(`[aegis-edge-backend] listening on http://localhost:${PORT}`));
+// Exported so tests can drive the app directly (supertest) without binding a
+// real port. Only listens when run directly (`node src/server.js`), not
+// when imported.
+export default app;
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const PORT = process.env.PORT || 8787;
+  app.listen(PORT, () => console.log(`[aegis-edge-backend] listening on http://localhost:${PORT}`));
+}

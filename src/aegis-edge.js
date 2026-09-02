@@ -111,6 +111,10 @@ export class AegisEdge {
     // raw text or image bytes, which never leave this SDK instance.
     this.backendUrl = opts.backendUrl ?? null;
     this.userRef = opts.userRef ?? null;
+    // Required alongside backendUrl: the server rejects unauthenticated
+    // /api/decisions calls (see server/src/auth.js). This key identifies
+    // your integration, not an end user — never derive it from user input.
+    this.ingestApiKey = opts.ingestApiKey ?? null;
 
     this.warnCount = 0;
     this.checkedCount = 0;
@@ -394,10 +398,14 @@ export class AegisEdge {
   /** POSTs a decision to the configured backend, if any. Never includes raw content — there is none in scope here. */
   async _reportToBackend(payload) {
     if (!this.backendUrl || !this.userRef) return;
+    if (!this.ingestApiKey) {
+      console.warn('[AegisEdge] backendUrl is set but ingestApiKey is missing — the server will reject this report. Continuing locally.');
+      return;
+    }
     try {
       await fetch(`${this.backendUrl}/api/decisions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': this.ingestApiKey },
         body: JSON.stringify({
           userRef: this.userRef,
           channelContext: payload.channelContext,

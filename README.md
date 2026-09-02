@@ -103,13 +103,16 @@ await guard.checkImage(fileOrBlob);
 await guard.checkAudio(clipBlob);
 ```
 
-Optionally report decisions to a server (see [`server/`](server/)):
+Optionally report decisions to a server (see [`server/`](server/)). `ingestApiKey`
+is required once `backendUrl` is set — the server rejects unauthenticated
+decision reports, so anyone can't forge warnings against your users:
 
 ```js
 const guard = new AegisEdge({
   channelContext: 'public',
   backendUrl: 'http://localhost:8787',
-  userRef: 'user-abc123',   // opaque id you control — no PII required
+  userRef: 'user-abc123',      // opaque id you control — no PII required
+  ingestApiKey: 'INGEST_API_KEY value from your server .env',
   // ...
 });
 ```
@@ -162,16 +165,29 @@ score.
 beyond the SDK: persistent review queue, moderator authentication, per-user
 warning and suspension state, and an append-only decision log.
 
+The server refuses to start without its required secrets — there is no
+insecure default to accidentally ship with:
+
 ```bash
 cd server
 npm install
+cp .env.example .env
+# fill in JWT_SECRET and INGEST_API_KEY (generator commands are in .env.example)
+# set ALLOWED_ORIGINS to your real frontend origin(s) before any real deployment
+
 node src/server.js     # http://localhost:8787
 # open server/public/dashboard.html
 ```
 
-Default seeded moderator is `admin@aegis-edge.local` / `changeme123` — **change
-this before any real use**, along with the JWT secret (both are flagged in the
-source).
+On first run, the server seeds one moderator account and prints a random
+password to the console once — it is not stored anywhere else, so copy it
+immediately. Log in and rotate it before any real use. Set
+`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` in `.env` instead if you want to
+choose the initial credentials yourself.
+
+Every SDK call to `/api/decisions` must include the `INGEST_API_KEY` you set
+above (via the SDK's `ingestApiKey` option) — without it, the endpoint that
+files warnings against a user would be open to anyone on the internet.
 
 ## Language coverage
 
@@ -196,7 +212,9 @@ Image NSFW detection and the audio vocal-tone signal are language-independent.
 - **External reporting integration** — for confirmed severe cases (e.g.
   CSAM), your compliance process should be the recipient. Aegis Edge is
   designed to be the *trigger*, never the custodian of such evidence.
-- **Production secrets management** in the reference server.
+- **A real production rate limiter** in front of the reference server. The
+  server includes a basic in-memory login-attempt limiter, but a real
+  deployment should sit behind a proper reverse-proxy or gateway limiter.
 
 ## Running tests
 
@@ -205,6 +223,16 @@ gate, proof hashing) is covered by unit tests that inject mock classifiers —
 no model download required, runs in under a second.
 
 ```bash
+npm test
+```
+
+The reference server has its own suite covering ingest-key enforcement, input
+validation, moderator auth, and the full warning/suspension/review flow —
+against an in-memory database, no real secrets needed:
+
+```bash
+cd server
+npm install
 npm test
 ```
 

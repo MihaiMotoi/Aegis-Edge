@@ -2,9 +2,13 @@ import Database from 'better-sqlite3';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const db = new Database(path.join(__dirname, '..', 'aegis_edge.db'));
+// DB_PATH lets tests point at ':memory:' or a throwaway file instead of the
+// real aegis_edge.db, so running the test suite never touches real data.
+const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'aegis_edge.db');
+const db = new Database(dbPath);
 
 db.pragma('journal_mode = WAL');
 
@@ -54,13 +58,25 @@ CREATE TABLE IF NOT EXISTS user_status (
 `);
 
 // Seed a default admin moderator on first run, if none exists.
-// NOTE: local dev convenience only — rotate/remove before any real deployment.
+// The seed password is never a fixed literal: it comes from
+// SEED_ADMIN_PASSWORD if set, otherwise a random one is generated and
+// printed ONCE. A fixed default ("changeme123") is a real risk in this kind
+// of project — plenty of instances go live with reference-server defaults
+// never rotated. A random one forces a first-login step either way.
 const existing = db.prepare('SELECT COUNT(*) AS c FROM moderators').get();
 if (existing.c === 0) {
-  const defaultHash = bcrypt.hashSync('changeme123', 10);
+  const email = process.env.SEED_ADMIN_EMAIL || 'admin@aegis-edge.local';
+  const password = process.env.SEED_ADMIN_PASSWORD || crypto.randomBytes(12).toString('base64url');
+  const defaultHash = bcrypt.hashSync(password, 10);
   db.prepare('INSERT INTO moderators (email, password_hash, role) VALUES (?, ?, ?)')
-    .run('admin@aegis-edge.local', defaultHash, 'admin');
-  console.log('[db] Seeded default moderator: admin@aegis-edge.local / changeme123 — CHANGE THIS before real use.');
+    .run(email, defaultHash, 'admin');
+  console.log('==========================================================');
+  console.log(`[db] Seeded first moderator account: ${email}`);
+  if (!process.env.SEED_ADMIN_PASSWORD) {
+    console.log(`[db] Generated password (shown once, not stored anywhere else): ${password}`);
+  }
+  console.log('[db] Log in and rotate this before any real deployment.');
+  console.log('==========================================================');
 }
 
 export default db;
