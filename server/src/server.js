@@ -14,7 +14,15 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o
 app.use(cors(allowedOrigins.length ? { origin: allowedOrigins } : { origin: false }));
 app.use(express.json());
 
-const MAX_WARNINGS = 3;
+// Each modality (text, audio, image) has its own independent warning
+// counter and ban ladder — a suspension on one never affects the others.
+// 3 confirmed violations (an auto BLOCKED, or a human-confirmed
+// WARNED_BY_HUMAN from the review queue) bans that modality for 1 hour the
+// first time, then 24 hours on every escalation after that (ban_level caps
+// at 2, so the duration caps at 24h too — it never grows past that).
+const MODALITY_MAX_WARNINGS = 3;
+const BAN_DURATION_MS_BY_LEVEL = { 1: 60 * 60 * 1000, 2: 24 * 60 * 60 * 1000 };
+const MODALITIES = ['text', 'audio', 'image'];
 
 // ---------------------------------------------------------------------------
 // Public-facing ingest endpoint: called by the SifEdge SDK after it makes
@@ -49,6 +57,18 @@ app.post('/api/decisions', requireIngestKey, (req, res) => {
     return res.status(400).json({ error: 'score must be a number between 0 and 1' });
   }
 
+  // Defense in depth: the SDK already gates checks locally once it knows a
+  // modality is banned (see src/sifedge.js), but the server is the source of
+  // truth for ban state, so it refuses to record new reports for a modality
+  // that's currently banned regardless of what the client believes.
+  const statusBeforeInsert = getUserStatus(userRef);
+  if (statusBeforeInsert.modalities[modality].isBanned) {
+    return res.status(403).json({
+      error: `user is currently banned on ${modality}`,
+      status: statusBeforeInsert,
+    });
+  }
+
   const info = db.prepare(`
     INSERT INTO decisions (external_id, user_ref, channel_context, modality, decision, score, input_hash, proof_hash, source, policy_id)
     VALUES (@externalId, @userRef, @channelContext, @modality, @decision, @score, @inputHash, @proofHash, @source, @policyId)
@@ -56,8 +76,13 @@ app.post('/api/decisions', requireIngestKey, (req, res) => {
 
   const decisionId = info.lastInsertRowid;
 
-  if (decision === 'BLOCKED') {
-    registerWarning(userRef);
+  // Both an auto BLOCKED and a human-confirmed WARNED_BY_HUMAN count as a
+  // confirmed violation toward that modality's warning counter — matches
+  // how the review queue has always treated a moderator's "confirm" action
+  // as equivalent to an automatic block.
+  let warnResult = null;
+  if (decision === 'BLOCKED' || decision === 'WARNED_BY_HUMAN') {
+    warnResult = registerWarning(userRef, modality);
   }
 
   if (decision === 'PENDING_REVIEW') {
@@ -65,7 +90,12 @@ app.post('/api/decisions', requireIngestKey, (req, res) => {
       .run(decisionId, userRef, modality, score);
   }
 
-  res.status(201).json({ decisionId, status: getUserStatus(userRef) });
+  res.status(201).json({
+    decisionId,
+    status: getUserStatus(userRef),
+    justBanned: warnResult?.justBanned ?? false,
+    banLevel: warnResult?.banLevel ?? null,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -107,16 +137,28 @@ app.post('/api/queue/:id/resolve', requireAuth, (req, res) => {
     FROM decisions WHERE id = ?
   `).run(decisionLabel, item.id, item.decision_id);
 
-  if (action === 'confirm') registerWarning(item.user_ref);
+  if (action === 'confirm') registerWarning(item.user_ref, item.modality);
 
   res.json({ resolved: true, action, status: getUserStatus(item.user_ref) });
 });
 
 // ---------------------------------------------------------------------------
-// Per-user status (warnings / suspension) — an integrator checks this before
-// letting a user post, or a moderator dashboard shows it for context.
+// Per-user status (warnings / suspension) — a moderator dashboard shows it
+// for context. Moderator-only: carries the full per-modality warning counts.
 // ---------------------------------------------------------------------------
 app.get('/api/users/:userRef/status', requireAuth, (req, res) => {
+  res.json(getUserStatus(req.params.userRef));
+});
+
+// ---------------------------------------------------------------------------
+// Ban status — called by the SDK itself (via ingestApiKey, not a moderator
+// token) so it can learn about an existing ban as soon as it's constructed,
+// before running a single check. Without this, a ban applied in an earlier
+// session would only be discovered reactively, after the SDK already ran
+// the classifier and the server rejected the report — this endpoint is what
+// lets checkText/checkAudio/checkImage gate *before* that ever happens.
+// ---------------------------------------------------------------------------
+app.get('/api/users/:userRef/ban-status', requireIngestKey, (req, res) => {
   res.json(getUserStatus(req.params.userRef));
 });
 
@@ -129,29 +171,63 @@ app.get('/api/decisions', requireAuth, (req, res) => {
   res.json({ decisions: rows });
 });
 
-function getUserStatus(userRef) {
+function ensureUserStatusRow(userRef) {
   let row = db.prepare('SELECT * FROM user_status WHERE user_ref = ?').get(userRef);
   if (!row) {
     db.prepare('INSERT INTO user_status (user_ref) VALUES (?)').run(userRef);
     row = db.prepare('SELECT * FROM user_status WHERE user_ref = ?').get(userRef);
   }
-  return {
-    userRef: row.user_ref,
-    warningCount: row.warning_count,
-    maxWarnings: MAX_WARNINGS,
-    isSuspended: !!row.is_suspended,
-    suspendedUntil: row.suspended_until,
-  };
+  return row;
 }
 
-function registerWarning(userRef) {
-  getUserStatus(userRef); // ensure row exists
-  const row = db.prepare('SELECT * FROM user_status WHERE user_ref = ?').get(userRef);
-  const newCount = Math.min(row.warning_count + 1, MAX_WARNINGS);
-  const suspend = newCount >= MAX_WARNINGS;
-  const suspendedUntil = suspend ? new Date(Date.now() + 24 * 3600 * 1000).toISOString() : row.suspended_until;
-  db.prepare('UPDATE user_status SET warning_count = ?, is_suspended = ?, suspended_until = ?, updated_at = datetime(\'now\') WHERE user_ref = ?')
-    .run(newCount, suspend ? 1 : 0, suspendedUntil, userRef);
+function getUserStatus(userRef) {
+  const row = ensureUserStatusRow(userRef);
+  const modalities = {};
+  for (const modality of MODALITIES) {
+    const bannedUntil = row[`${modality}_banned_until`];
+    const isBanned = !!bannedUntil && new Date(bannedUntil).getTime() > Date.now();
+    modalities[modality] = {
+      warningCount: row[`${modality}_warning_count`],
+      maxWarnings: MODALITY_MAX_WARNINGS,
+      banLevel: row[`${modality}_ban_level`],
+      isBanned,
+      // Once a ban expires it's still on the row (for the escalation-level
+      // check next time), but it's no longer "the" active ban — don't
+      // report a stale timestamp as if it were current.
+      bannedUntil: isBanned ? bannedUntil : null,
+    };
+  }
+  return { userRef: row.user_ref, modalities };
+}
+
+// Registers one confirmed violation (auto BLOCKED or human-confirmed
+// WARNED_BY_HUMAN) against a single modality. At 3 warnings the counter
+// resets to 0 and a ban is applied: 1 hour the first time (ban_level 0->1),
+// 24 hours every time after that (ban_level caps at 2, so does the
+// duration — see BAN_DURATION_MS_BY_LEVEL). Returns whether this call just
+// triggered a new ban, and at what level, so callers can react (e.g. fire
+// the SDK's onImageBanNotice at the 24h level).
+function registerWarning(userRef, modality) {
+  const row = ensureUserStatusRow(userRef);
+  const countCol = `${modality}_warning_count`;
+  const levelCol = `${modality}_ban_level`;
+  const untilCol = `${modality}_banned_until`;
+
+  const newCount = row[countCol] + 1;
+  if (newCount < MODALITY_MAX_WARNINGS) {
+    db.prepare(`UPDATE user_status SET ${countCol} = ?, updated_at = datetime('now') WHERE user_ref = ?`)
+      .run(newCount, userRef);
+    return { justBanned: false };
+  }
+
+  const newLevel = Math.min(row[levelCol] + 1, 2);
+  const bannedUntil = new Date(Date.now() + BAN_DURATION_MS_BY_LEVEL[newLevel]).toISOString();
+  db.prepare(`
+    UPDATE user_status
+    SET ${countCol} = 0, ${levelCol} = ?, ${untilCol} = ?, updated_at = datetime('now')
+    WHERE user_ref = ?
+  `).run(newLevel, bannedUntil, userRef);
+  return { justBanned: true, banLevel: newLevel, bannedUntil };
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));

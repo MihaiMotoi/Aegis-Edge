@@ -31,6 +31,19 @@ function mockTextClassifier(score) {
 // any Blob/URL handling), so a plain object stands in fine.
 const fakeBlob = {};
 
+// checkImage/checkAudio hash the raw bytes and (for images) create an
+// object URL — real browser APIs Node doesn't have. A fake File/Blob with
+// just enough surface, plus a URL.createObjectURL stub, is enough since
+// _imgClassifier/_RawImage/_decodeAudio are mocked directly in these tests
+// anyway (same pattern the rest of this file already uses).
+function fakeFile() {
+  return { arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
+}
+// Node 20+ ships a real URL.createObjectURL that insists on an actual Blob
+// instance; the fake objects above aren't one, so it's overridden here for
+// tests only — checkImage/checkAudio never read the URL it returns.
+globalThis.URL.createObjectURL = () => 'blob:fake';
+
 describe('private channel gate', () => {
   test('checkText/checkImage/checkAudio return null and never call a classifier', async () => {
     let calls = 0;
@@ -82,52 +95,177 @@ describe('3-band routing', () => {
   });
 });
 
-describe('warning counter', () => {
-  test('a PENDING_REVIEW case does not increment warnCount until a human resolves it', async () => {
+describe('warning counter (no backend — local per-modality fallback)', () => {
+  test('a PENDING_REVIEW case does not increment the warning counter until a human resolves it', async () => {
     const guard = createGuard({ channelContext: 'public' });
     guard._textClassifier = mockTextClassifier(0.7); // falls in the default review band
     await guard.checkText('hmm');
-    assert.equal(guard.warnCount, 0);
+    assert.equal(guard.getStats().modalities.text.warningCount, 0);
     assert.equal(guard.getStats().pendingReview, 1);
   });
 
-  test('resolveReview("confirm") increments warnCount; "dismiss" does not', async () => {
+  test('resolveReview("confirm") increments the modality\'s warning counter; "dismiss" does not', async () => {
     const guard = createGuard({ channelContext: 'public' });
     guard._textClassifier = mockTextClassifier(0.7);
 
     const r1 = await guard.checkText('a');
     await guard.resolveReview(r1.reviewId, 'dismiss');
-    assert.equal(guard.warnCount, 0);
+    assert.equal(guard.getStats().modalities.text.warningCount, 0);
 
     const r2 = await guard.checkText('b');
     await guard.resolveReview(r2.reviewId, 'confirm');
-    assert.equal(guard.warnCount, 1);
+    assert.equal(guard.getStats().modalities.text.warningCount, 1);
   });
 
-  test('the 3rd confirmed warning blocks the guard; further checks become no-ops', async () => {
-    let thresholdReached = false;
+  test('the 3rd confirmed warning blocks that modality; further checks on it become no-ops', async () => {
+    let thresholdReachedModality = null;
     const guard = createGuard({
       channelContext: 'public',
       maxWarnings: 3,
-      onWarningThresholdReached: () => { thresholdReached = true; },
+      onWarningThresholdReached: (modality) => { thresholdReachedModality = modality; },
     });
     // BLOCKED results are auto-confirmed warnings by design (see the SDK's
-    // module docstring: "auto-blocked, or human-confirmed ... count toward
-    // a shared 3-strike counter"), so three BLOCKED checks exercise the
-    // same _registerWarning() path as three resolveReview('confirm') calls.
+    // module docstring), so three BLOCKED checks exercise the same
+    // _registerWarning() path as three resolveReview('confirm') calls.
     guard._textClassifier = mockTextClassifier(0.95);
 
     await guard.checkText('1');
     await guard.checkText('2');
-    assert.equal(guard.isBlocked(), false);
+    assert.equal(guard.isBlocked('text'), false);
     await guard.checkText('3');
 
-    assert.equal(guard.warnCount, 3);
-    assert.equal(guard.isBlocked(), true);
-    assert.equal(thresholdReached, true);
+    assert.equal(guard.getStats().modalities.text.warningCount, 3);
+    assert.equal(guard.isBlocked('text'), true);
+    assert.equal(thresholdReachedModality, 'text');
 
     const result = await guard.checkText('4');
     assert.equal(result, null, 'checks after the warning cap must be a no-op');
+  });
+});
+
+describe('per-modality independence (no backend — local fallback)', () => {
+  test('banning text (3 BLOCKED) does not affect audio or image', async () => {
+    const guard = createGuard({ channelContext: 'public', lowThreshold: 0.55, highThreshold: 0.9 });
+    guard._textClassifier = mockTextClassifier(0.95);
+    await guard.checkText('1');
+    await guard.checkText('2');
+    await guard.checkText('3');
+
+    assert.equal(guard.isBlocked('text'), true);
+    assert.equal(guard.isBlocked('audio'), false);
+    assert.equal(guard.isBlocked('image'), false);
+  });
+
+  test('audio has its own independent 3-strike counter, same mechanism as text', async () => {
+    let thresholdReachedModality = null;
+    const guard = createGuard({
+      channelContext: 'public',
+      onWarningThresholdReached: (modality) => { thresholdReachedModality = modality; },
+    });
+    guard._decodeAudio = async () => new Float32Array(10);
+    guard._audioTranscriber = async () => ({ text: '' }); // no transcript -> content score stays 0
+    guard._audioEmotionClassifier = async () => [{ label: 'angry', score: 0.95 }]; // vocal tone drives the score
+
+    await guard.checkAudio(fakeFile());
+    await guard.checkAudio(fakeFile());
+    assert.equal(guard.isBlocked('audio'), false);
+    await guard.checkAudio(fakeFile());
+
+    assert.equal(guard.isBlocked('audio'), true);
+    assert.equal(thresholdReachedModality, 'audio');
+    assert.equal(guard.isBlocked('text'), false, 'banning audio must not touch text');
+  });
+});
+
+describe('modality gate — classifier never runs while banned', () => {
+  test('checkText calls the classifier 0 times once text is banned', async () => {
+    const guard = createGuard({ channelContext: 'public', lowThreshold: 0.55, highThreshold: 0.9 });
+    guard._textClassifier = mockTextClassifier(0.95);
+    await guard.checkText('1');
+    await guard.checkText('2');
+    await guard.checkText('3');
+    assert.equal(guard.isBlocked('text'), true);
+
+    let calls = 0;
+    guard._textClassifier = async () => { calls++; return [{ label: 'toxic', score: 0.95 }]; };
+    const result = await guard.checkText('one more');
+    assert.equal(result, null);
+    assert.equal(calls, 0, 'no classifier call once the modality is banned');
+  });
+
+  test('checkAudio calls neither audio classifier once audio is banned', async () => {
+    const guard = createGuard({ channelContext: 'public' });
+    guard._decodeAudio = async () => new Float32Array(10);
+    guard._audioTranscriber = async () => ({ text: '' });
+    guard._audioEmotionClassifier = async () => [{ label: 'angry', score: 0.95 }];
+    await guard.checkAudio(fakeFile());
+    await guard.checkAudio(fakeFile());
+    await guard.checkAudio(fakeFile());
+    assert.equal(guard.isBlocked('audio'), true);
+
+    let calls = 0;
+    guard._audioTranscriber = async () => { calls++; return { text: '' }; };
+    guard._audioEmotionClassifier = async () => { calls++; return [{ label: 'angry', score: 0.95 }]; };
+    const result = await guard.checkAudio(fakeFile());
+    assert.equal(result, null);
+    assert.equal(calls, 0, 'no classifier call once the modality is banned');
+  });
+});
+
+describe('checkImage — shouldBlur and onImageBanNotice', () => {
+  test('a BLOCKED image result carries shouldBlur: true on the very first offense (before any ban)', async () => {
+    const guard = createGuard({ channelContext: 'public', lowThreshold: 0.55, highThreshold: 0.9 });
+    guard._imgClassifier = async () => [{ label: 'nsfw', score: 0.95 }];
+    guard._RawImage = { fromURL: async () => ({}) };
+
+    const result = await guard.checkImage(fakeFile());
+    assert.equal(result.decision, 'BLOCKED');
+    assert.equal(result.shouldBlur, true);
+    assert.equal(guard.isBlocked('image'), false, 'shouldBlur fires independent of the counter/ban');
+  });
+
+  test('an ALLOWED image result does not carry shouldBlur', async () => {
+    const guard = createGuard({ channelContext: 'public', lowThreshold: 0.55, highThreshold: 0.9 });
+    guard._imgClassifier = async () => [{ label: 'nsfw', score: 0.1 }];
+    guard._RawImage = { fromURL: async () => ({}) };
+
+    const result = await guard.checkImage(fakeFile());
+    assert.equal(result.decision, 'ALLOWED');
+    assert.equal(result.shouldBlur, undefined);
+  });
+
+  test('onImageBanNotice fires once image reaches its local block threshold, not before', async () => {
+    let noticeCount = 0;
+    const guard = createGuard({
+      channelContext: 'public',
+      lowThreshold: 0.55,
+      highThreshold: 0.9,
+      onImageBanNotice: () => { noticeCount++; },
+    });
+    guard._imgClassifier = async () => [{ label: 'nsfw', score: 0.95 }];
+    guard._RawImage = { fromURL: async () => ({}) };
+
+    await guard.checkImage(fakeFile());
+    assert.equal(noticeCount, 0);
+    await guard.checkImage(fakeFile());
+    assert.equal(noticeCount, 0);
+    await guard.checkImage(fakeFile());
+    assert.equal(noticeCount, 1);
+    assert.equal(guard.isBlocked('image'), true);
+  });
+
+  test('onImageBanNotice does not fire for text or audio bans', async () => {
+    let noticeCount = 0;
+    const guard = createGuard({
+      channelContext: 'public',
+      onImageBanNotice: () => { noticeCount++; },
+    });
+    guard._textClassifier = mockTextClassifier(0.95);
+    await guard.checkText('1');
+    await guard.checkText('2');
+    await guard.checkText('3');
+    assert.equal(guard.isBlocked('text'), true);
+    assert.equal(noticeCount, 0);
   });
 });
 

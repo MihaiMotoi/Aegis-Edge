@@ -50,12 +50,38 @@ CREATE TABLE IF NOT EXISTS moderators (
 
 CREATE TABLE IF NOT EXISTS user_status (
   user_ref TEXT PRIMARY KEY,
-  warning_count INTEGER NOT NULL DEFAULT 0,
-  is_suspended INTEGER NOT NULL DEFAULT 0,
-  suspended_until TEXT,
+  text_warning_count INTEGER NOT NULL DEFAULT 0,
+  text_ban_level INTEGER NOT NULL DEFAULT 0,
+  text_banned_until TEXT,
+  audio_warning_count INTEGER NOT NULL DEFAULT 0,
+  audio_ban_level INTEGER NOT NULL DEFAULT 0,
+  audio_banned_until TEXT,
+  image_warning_count INTEGER NOT NULL DEFAULT 0,
+  image_ban_level INTEGER NOT NULL DEFAULT 0,
+  image_banned_until TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `);
+
+// Migration: databases created before per-modality warnings/bans have a
+// user_status table with only the old global columns (warning_count,
+// is_suspended, suspended_until). Add the new per-modality columns without
+// touching those legacy columns or any existing row — CREATE TABLE IF NOT
+// EXISTS above is a no-op against them, so this has to run unconditionally
+// and be idempotent itself.
+const MODALITY_STATUS_COLUMNS = ['text', 'audio', 'image'].flatMap((modality) => [
+  [`${modality}_warning_count`, 'INTEGER NOT NULL DEFAULT 0'],
+  [`${modality}_ban_level`, 'INTEGER NOT NULL DEFAULT 0'],
+  [`${modality}_banned_until`, 'TEXT'],
+]);
+const existingUserStatusColumns = new Set(
+  db.prepare('PRAGMA table_info(user_status)').all().map((c) => c.name)
+);
+for (const [columnName, columnDef] of MODALITY_STATUS_COLUMNS) {
+  if (!existingUserStatusColumns.has(columnName)) {
+    db.exec(`ALTER TABLE user_status ADD COLUMN ${columnName} ${columnDef}`);
+  }
+}
 
 // Seed a default admin moderator on first run, if none exists.
 // The seed password is never a fixed literal: it comes from

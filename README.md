@@ -46,7 +46,8 @@ Every check returns one of three outcomes:
 - **`BLOCKED`** — high confidence, actioned automatically.
 
 Confirmed violations (auto-blocked, or human-confirmed from the review queue)
-count toward a shared 3-strike counter, after which the user is suspended.
+count toward that modality's own warning counter and, past 3, suspend that
+modality specifically — see [Warnings & suspension](#warnings--suspension).
 
 ## Why it's different
 
@@ -73,6 +74,49 @@ jurisdictions regardless of intent.
 automated warnings. They wait for a reviewer. Only high-confidence, clear-cut
 cases are actioned without a human.
 
+## Warnings & suspension
+
+Text, audio, and image each have their **own independent** 3-strike counter
+and ban ladder — there is no shared counter, and banning one modality never
+touches the other two.
+
+For a given modality: 3 confirmed violations (an auto `BLOCKED`, or a
+human-confirmed `WARNED_BY_HUMAN` from the review queue) ban **that
+modality** for **1 hour**, and reset its counter to 0. If it happens again
+after that ban expires, the next ban is **24 hours** — the ceiling; it never
+escalates past that. While a modality is banned, every check against it
+returns `null` immediately, with no classifier call — the same hard gate as
+the private-channel check.
+
+```js
+guard.isBlocked('text');   // true while text is currently banned
+guard.getStats().modalities.text;
+// -> { warningCount, maxWarnings, banLevel, isBanned, bannedUntil }
+```
+
+**Images get one more thing:** every `BLOCKED` image result carries
+`shouldBlur: true` instantly, on the very first offense — independent of the
+warning counter or any ban — so you can blur it in your UI right away.
+Separately, when the *image* modality specifically reaches its 24-hour ban,
+`onImageBanNotice` fires so you know to notify the user; the SDK never sends
+anything itself, it only signals that a notice is due:
+
+```js
+const guard = new SifEdge({
+  onImageBanNotice: () => {
+    // send your own text-channel notice — SMS, email, in-app — however you reach this user
+  },
+});
+```
+
+**Real, cross-session ban durations require a connected backend.** A 1-hour
+or 24-hour suspension has to survive a page reload or a closed tab, so it's
+stored server-side, per `userRef`, per modality (see [`server/`](server/) —
+the `user_status` table). Without `backendUrl` configured, the SDK falls
+back to a simplified, browser-memory-only version: 3 strikes blocks that
+modality until the page reloads, with no timed expiry and no escalation
+levels — a duration can't mean anything with nowhere to persist it.
+
 ## Quick start
 
 ```bash
@@ -96,16 +140,20 @@ const guard = new SifEdge({
   channelContext: 'public',        // 'public' | 'private' — YOU set this, never the end user
   lowThreshold: 0.55,              // below -> allowed
   highThreshold: 0.90,             // above -> blocked; in between -> human review
-  maxWarnings: 3,
+  maxWarnings: 3,                  // strikes per modality — text, audio, and image count separately
 
   onDecision: (r) => {
-    // r = { decision, score, modality, proofHash, timestamp, source, triggerLabel }
+    // r = { decision, score, modality, proofHash, timestamp, source, triggerLabel, shouldBlur }
+    // shouldBlur is only ever present (true) on a BLOCKED image result.
   },
   onPendingReview: (item) => {
     // route to your reviewer UI; resolve with guard.resolveReview(item.id, 'confirm'|'dismiss')
   },
-  onWarningThresholdReached: () => {
-    // 3 confirmed warnings — apply your suspension policy
+  onWarningThresholdReached: (modality) => {
+    // that modality just got banned — 1h the first time, 24h on every repeat after
+  },
+  onImageBanNotice: () => {
+    // image specifically hit its 24h ban — send your own text-channel notice
   },
 });
 
@@ -176,7 +224,9 @@ score.
 
 `server/` is a reference implementation of the pieces a real deployment needs
 beyond the SDK: persistent review queue, moderator authentication, per-user
-warning and suspension state, and an append-only decision log.
+per-modality warning and ban state (see
+[Warnings & suspension](#warnings--suspension)), and an append-only decision
+log.
 
 The server refuses to start without its required secrets — there is no
 insecure default to accidentally ship with:
@@ -216,7 +266,10 @@ when the first-run password was missed.
 
 Every SDK call to `/api/decisions` must include the `INGEST_API_KEY` you set
 above (via the SDK's `ingestApiKey` option) — without it, the endpoint that
-files warnings against a user would be open to anyone on the internet.
+files warnings against a user would be open to anyone on the internet. The
+same key also authenticates `GET /api/users/:userRef/ban-status`, which the
+SDK calls once on construction so it knows about an existing ban before
+running a single check, rather than only finding out reactively.
 
 ## Language coverage
 
@@ -247,8 +300,9 @@ Image NSFW detection and the audio vocal-tone signal are language-independent.
 
 ## Running tests
 
-The SDK's decision logic (routing, thresholds, warning counter, private-channel
-gate, proof hashing) is covered by unit tests that inject mock classifiers —
+The SDK's decision logic (routing, thresholds, per-modality warning counters
+and ban gates, private-channel gate, proof hashing) is covered by unit tests
+that inject mock classifiers —
 no model download required, runs in under a second.
 
 ```bash

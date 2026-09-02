@@ -12,6 +12,7 @@ process.env.SEED_ADMIN_PASSWORD = 'test-admin-pw-123';
 
 await import('../src/env-check.js');
 const { default: app } = await import('../src/server.js');
+const { default: db } = await import('../src/db.js');
 
 function validDecisionPayload(overrides = {}) {
   return {
@@ -120,7 +121,25 @@ describe('moderator auth', () => {
   });
 });
 
-describe('warning + suspension flow', () => {
+describe('GET /api/users/:userRef/ban-status', () => {
+  test('rejects requests with no valid x-api-key (moderator token is not enough)', async () => {
+    const res = await request(app).get('/api/users/someone/ban-status');
+    assert.equal(res.status, 401);
+  });
+
+  test('accepts the ingest key and returns per-modality status', async () => {
+    const res = await request(app)
+      .get('/api/users/ban-status-check/ban-status')
+      .set('x-api-key', 'test-ingest-key');
+    assert.equal(res.status, 200);
+    for (const modality of ['text', 'audio', 'image']) {
+      assert.ok(res.body.modalities[modality], `expected a ${modality} entry`);
+      assert.equal(res.body.modalities[modality].isBanned, false);
+    }
+  });
+});
+
+describe('warning + ban flow (independent per modality)', () => {
   let token;
   before(async () => {
     const login = await request(app)
@@ -129,20 +148,91 @@ describe('warning + suspension flow', () => {
     token = login.body.token;
   });
 
-  test('three BLOCKED decisions suspend the user', async () => {
-    const userRef = 'user-flow-1';
+  async function blockThreeTimes(userRef, overrides = {}) {
+    let res;
     for (let i = 0; i < 3; i++) {
-      const res = await request(app)
+      res = await request(app)
         .post('/api/decisions')
         .set('x-api-key', 'test-ingest-key')
-        .send(validDecisionPayload({ userRef, decision: 'BLOCKED', score: 0.95 }));
+        .send(validDecisionPayload({ userRef, decision: 'BLOCKED', score: 0.95, ...overrides }));
       assert.equal(res.status, 201);
     }
+    return res;
+  }
+
+  test('three BLOCKED decisions on text ban only text, for ~1 hour, and reset that counter to 0', async () => {
+    const userRef = 'user-flow-1';
+    await blockThreeTimes(userRef);
+
     const status = await request(app)
       .get(`/api/users/${userRef}/status`)
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(status.body.warningCount, 3);
-    assert.equal(status.body.isSuspended, true);
+    const text = status.body.modalities.text;
+    assert.equal(text.warningCount, 0, 'the counter resets once a ban is applied');
+    assert.equal(text.banLevel, 1);
+    assert.equal(text.isBanned, true);
+    const msUntilBan = new Date(text.bannedUntil).getTime() - Date.now();
+    assert.ok(msUntilBan > 55 * 60 * 1000 && msUntilBan <= 60 * 60 * 1000, `expected ~1h ban, got ${msUntilBan}ms`);
+
+    // Banning text must never touch audio or image.
+    assert.equal(status.body.modalities.audio.isBanned, false);
+    assert.equal(status.body.modalities.image.isBanned, false);
+  });
+
+  test('while a modality is banned, a new report for it is rejected (403) and not recorded', async () => {
+    const userRef = 'user-flow-gate';
+    await blockThreeTimes(userRef);
+
+    const res = await request(app)
+      .post('/api/decisions')
+      .set('x-api-key', 'test-ingest-key')
+      .send(validDecisionPayload({ userRef, decision: 'ALLOWED', score: 0.1 }));
+    assert.equal(res.status, 403);
+  });
+
+  test('escalates to a 24h ban once a modality hits 3 warnings again after its 1h ban expired, and that level is the ceiling', async () => {
+    const userRef = 'user-flow-escalate';
+    await blockThreeTimes(userRef);
+
+    // Simulate the 1h ban having already expired.
+    db.prepare("UPDATE user_status SET text_banned_until = datetime('now', '-1 minute') WHERE user_ref = ?").run(userRef);
+
+    const secondBanRes = await blockThreeTimes(userRef);
+    assert.equal(secondBanRes.body.justBanned, true);
+    assert.equal(secondBanRes.body.banLevel, 2);
+
+    let status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    let text = status.body.modalities.text;
+    assert.equal(text.banLevel, 2);
+    let msUntilBan = new Date(text.bannedUntil).getTime() - Date.now();
+    assert.ok(msUntilBan > 23.5 * 3600 * 1000 && msUntilBan <= 24 * 3600 * 1000, `expected ~24h ban, got ${msUntilBan}ms`);
+
+    // Expire the 24h ban too, then hit 3 more — must stay at level 2 (24h),
+    // never escalate past the ceiling.
+    db.prepare("UPDATE user_status SET text_banned_until = datetime('now', '-1 minute') WHERE user_ref = ?").run(userRef);
+    const thirdBanRes = await blockThreeTimes(userRef);
+    assert.equal(thirdBanRes.body.banLevel, 2, 'ban level must cap at 2 (24h) and never escalate past it');
+
+    status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    msUntilBan = new Date(status.body.modalities.text.bannedUntil).getTime() - Date.now();
+    assert.ok(msUntilBan > 23.5 * 3600 * 1000 && msUntilBan <= 24 * 3600 * 1000, 'the repeat ban is still 24h, not longer');
+  });
+
+  test('audio follows the same 3 -> 1h escalation as text, independently of it', async () => {
+    const userRef = 'user-flow-audio';
+    await blockThreeTimes(userRef, { modality: 'audio', policyId: 'SIFEDGE-AUDIO-POL-01' });
+
+    const status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.audio.banLevel, 1);
+    assert.equal(status.body.modalities.audio.isBanned, true);
+    assert.equal(status.body.modalities.text.isBanned, false, 'banning audio must not touch text');
+    assert.equal(status.body.modalities.image.isBanned, false, 'banning audio must not touch image');
   });
 
   test('a human "dismiss" on a pending review does not add a warning', async () => {
@@ -166,7 +256,7 @@ describe('warning + suspension flow', () => {
     const status = await request(app)
       .get(`/api/users/${userRef}/status`)
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(status.body.warningCount, 0);
+    assert.equal(status.body.modalities.text.warningCount, 0);
   });
 
   test('a human "confirm" on a pending review does add a warning', async () => {
@@ -189,6 +279,6 @@ describe('warning + suspension flow', () => {
     const status = await request(app)
       .get(`/api/users/${userRef}/status`)
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(status.body.warningCount, 1);
+    assert.equal(status.body.modalities.text.warningCount, 1);
   });
 });
