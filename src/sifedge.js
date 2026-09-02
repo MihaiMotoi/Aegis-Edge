@@ -115,6 +115,13 @@ export class SifEdge {
 
   static MODALITIES = ['text', 'audio', 'image'];
 
+  // How long a hydrated ban-status cache is trusted before a gate check
+  // forces a fresh fetch. Bounds how long a ban applied by something other
+  // than this SDK instance's own traffic can go unnoticed while the page
+  // stays open — the tradeoff is this many seconds of possible staleness
+  // against one extra request per modality gate check when it's stale.
+  static BAN_STATUS_CACHE_MS = 30_000;
+
   constructor(opts = {}) {
     this.channelContext = opts.channelContext ?? 'public';
     this.lowThreshold = opts.lowThreshold ?? 0.55;
@@ -146,12 +153,20 @@ export class SifEdge {
     this._nextId = 1;
 
     // Per-modality state. In backend mode this is a read-only cache of what
-    // the server last told us (hydrated on construction, refreshed on every
-    // decision report); the server is the source of truth for ban timing.
-    // Without a backend there's nowhere to persist a real duration, so it's
-    // a simplified local counter: 3 strikes blocks that modality until the
-    // page reloads, no timed expiry, no escalation levels.
+    // the server last told us; the server is the source of truth for ban
+    // timing. It's refreshed (a) once at construction, (b) after every
+    // decision report's response, and (c) again before any gate check once
+    // it's older than BAN_STATUS_CACHE_MS — see _ensureFreshBanStatus. That
+    // third path is what catches a ban this instance didn't cause itself
+    // (a moderator action, another tab/device for the same userRef) while
+    // the page stays open; without it, only a fresh construction would ever
+    // see it. Without a backend there's nowhere to persist a real duration,
+    // so it's a simplified local counter instead: 3 strikes blocks that
+    // modality until the page reloads, no timed expiry, no escalation
+    // levels, and no re-check needed since nothing external can change it.
     this._modalityBanStatus = { text: null, audio: null, image: null };
+    this._banStatusFetchedAt = 0; // epoch ms of the last successful hydration; 0 = never fetched
+    this._banStatusInFlight = null; // in-flight hydration promise, shared by concurrent callers
     this._localWarnCount = { text: 0, audio: 0, image: 0 };
     this._localBlocked = { text: false, audio: false, image: false };
 
@@ -160,12 +175,12 @@ export class SifEdge {
     this._audioTranscriber = null;
     this._audioEmotionClassifier = null;
     this._readyPromise = this._loadModels(opts.transformersUrl, opts.models);
-    // Independent of model loading: hydrates _modalityBanStatus from the
-    // server (if backend-connected) so checkText/checkAudio/checkImage can
-    // gate correctly on the very first call, not just after the first
-    // report round-trip. Resolves immediately, doing nothing, without a
-    // backend.
-    this._banStatusPromise = this._hydrateBanStatus();
+    // Independent of model loading: warms _modalityBanStatus from the server
+    // (if backend-connected) so checkText/checkAudio/checkImage can gate
+    // correctly on the very first call. checkText/checkAudio/checkImage each
+    // call _ensureFreshBanStatus() themselves too (which no-ops if this is
+    // still fresh), so a ban is never missed by more than the cache window.
+    this._banStatusPromise = this._ensureFreshBanStatus();
   }
 
   /**
@@ -252,11 +267,26 @@ export class SifEdge {
   }
 
   /**
+   * Ensures _modalityBanStatus is no older than BAN_STATUS_CACHE_MS before a
+   * gate check runs, re-fetching from the server if it's gone stale. No-op
+   * without a fully configured backend. Concurrent callers while a fetch is
+   * already in flight (e.g. checkText and checkImage racing right after
+   * construction) share that one fetch rather than each firing their own.
+   */
+  async _ensureFreshBanStatus() {
+    if (!this.backendUrl || !this.userRef || !this.ingestApiKey) return;
+    if (this._banStatusFetchedAt && Date.now() - this._banStatusFetchedAt < SifEdge.BAN_STATUS_CACHE_MS) return;
+    if (!this._banStatusInFlight) {
+      this._banStatusInFlight = this._hydrateBanStatus().finally(() => { this._banStatusInFlight = null; });
+    }
+    return this._banStatusInFlight;
+  }
+
+  /**
    * Fetches the current per-modality ban state from the backend (via the
-   * ingest key, not a moderator token — see server/src/server.js) so a ban
-   * from an earlier session is known before the first check runs, not just
-   * discovered reactively after a report gets rejected. No-op without a
-   * fully configured backend.
+   * ingest key, not a moderator token — see server/src/server.js). Always
+   * hits the network — callers wanting the cache/staleness check should go
+   * through _ensureFreshBanStatus instead.
    */
   async _hydrateBanStatus() {
     if (!this.backendUrl || !this.userRef || !this.ingestApiKey) return;
@@ -264,7 +294,10 @@ export class SifEdge {
       const res = await fetch(`${this.backendUrl}/api/users/${encodeURIComponent(this.userRef)}/ban-status`, {
         headers: { 'x-api-key': this.ingestApiKey },
       });
-      if (res.ok) this._applyServerStatus(await res.json());
+      if (res.ok) {
+        this._applyServerStatus(await res.json());
+        this._banStatusFetchedAt = Date.now();
+      }
     } catch (e) {
       console.warn('[SifEdge] could not fetch ban status (continuing without it):', e.message);
     }
@@ -300,7 +333,7 @@ export class SifEdge {
    */
   async checkText(text) {
     if (this.channelContext === 'private') return null; // hard gate — classifier never invoked
-    await this._banStatusPromise;
+    await this._ensureFreshBanStatus();
     if (this._isModalityBanned('text')) return null; // hard gate — classifier never invoked while banned
     if (!this._textClassifier) await this.ready();
 
@@ -317,7 +350,7 @@ export class SifEdge {
    */
   async checkImage(fileOrBlob) {
     if (this.channelContext === 'private') return null;
-    await this._banStatusPromise;
+    await this._ensureFreshBanStatus();
     if (this._isModalityBanned('image')) return null;
     if (!this._imgClassifier) await this.ready();
 
@@ -349,7 +382,7 @@ export class SifEdge {
    */
   async checkAudio(fileOrBlob) {
     if (this.channelContext === 'private') return null;
-    await this._banStatusPromise;
+    await this._ensureFreshBanStatus();
     if (this._isModalityBanned('audio')) return null;
     if (!this._audioTranscriber) await this.ready();
 
@@ -515,13 +548,17 @@ export class SifEdge {
 
   /**
    * Absorbs a `{ status, justBanned, banLevel }` response from POST
-   * /api/decisions: refreshes the local ban-status cache, and — only on the
-   * turn a ban was *just* newly applied — fires onWarningThresholdReached
-   * for that modality, plus onImageBanNotice specifically when it's the
-   * image modality reaching its 24h ceiling (banLevel 2).
+   * /api/decisions: refreshes the local ban-status cache (this snapshot is
+   * exactly as fresh as one from _hydrateBanStatus, so it also resets the
+   * cache-staleness clock — one less _ensureFreshBanStatus round-trip
+   * needed on the next check), and — only on the turn a ban was *just*
+   * newly applied — fires onWarningThresholdReached for that modality, plus
+   * onImageBanNotice specifically when it's the image modality reaching its
+   * 24h ceiling (banLevel 2).
    */
   _handleBackendDecisionResult(modality, data) {
     this._applyServerStatus(data.status);
+    this._banStatusFetchedAt = Date.now();
     if (data.justBanned) {
       this.onWarningThresholdReached(modality);
       if (modality === 'image' && data.banLevel === 2) this.onImageBanNotice();

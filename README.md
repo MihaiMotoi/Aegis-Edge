@@ -268,8 +268,11 @@ Every SDK call to `/api/decisions` must include the `INGEST_API_KEY` you set
 above (via the SDK's `ingestApiKey` option) — without it, the endpoint that
 files warnings against a user would be open to anyone on the internet. The
 same key also authenticates `GET /api/users/:userRef/ban-status`, which the
-SDK calls once on construction so it knows about an existing ban before
-running a single check, rather than only finding out reactively.
+SDK calls on construction, and again before any gate check once its cached
+copy is older than 30 seconds, so it also catches a ban applied by
+something other than this SDK instance's own traffic (a moderator action,
+another tab or device for the same `userRef`) while the page stays open —
+not just an existing ban at construction time.
 
 ## Language coverage
 
