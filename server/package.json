@@ -6,7 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "reset-admin-password": "node scripts/reset-admin-password.js"
   },
   "license": "Apache-2.0",
   "dependencies": {

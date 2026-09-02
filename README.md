@@ -185,6 +185,22 @@ immediately. Log in and rotate it before any real use. Set
 `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` in `.env` instead if you want to
 choose the initial credentials yourself.
 
+If you miss that first-run password, there is no way to recover it — a
+password hash can't be reversed. Use the reset script instead of deleting
+the database, which would also wipe every existing decision and warning:
+
+```bash
+cd server
+npm run reset-admin-password -- admin@aegis-edge.local
+```
+
+Point `DB_PATH` at your real database file if it isn't the default one next
+to the server. The script looks up the account by email, generates a new
+random password the same way the first-run seed does, and prints it once —
+copy it immediately, it is not shown again. Use this same command any time
+you need to rotate the password on an existing moderator account, not just
+when the first-run password was missed.
+
 Every SDK call to `/api/decisions` must include the `INGEST_API_KEY` you set
 above (via the SDK's `ingestApiKey` option) — without it, the endpoint that
 files warnings against a user would be open to anyone on the internet.
