@@ -67,17 +67,30 @@
 
   .dropzone { border:2px dashed var(--border); border-radius:12px; padding:28px; text-align:center; cursor:pointer; color:var(--muted); font-size:13px; }
   .dropzone.drag { border-color:var(--ok); color:var(--text); }
+  .dropzone.isBanned { border-color: rgba(255,72,72,.4); color:var(--danger); cursor:not-allowed; opacity:.75; }
   .dropzone input { display:none; }
 
   .note { font-size:12px; color:var(--subtle); line-height:1.5; margin-top:6px; }
 
-  .statusGrid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  .statusGrid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:14px; }
   .statBox { background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:10px; padding:12px; text-align:center; }
   .statBox .num { font-size:20px; font-weight:700; font-family:var(--font-mono); }
   .statBox .lbl { font-size:10px; color:var(--muted); margin-top:4px; }
-  .statBox.warnState .num { color:var(--warn); }
   .statBox.blockState .num { color:var(--danger); }
   .statBox.humanState .num { color:var(--human); }
+
+  .modalityStatus { display:flex; flex-direction:column; gap:8px; }
+  .modRow { background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:10px; padding:10px 13px; }
+  .modRow .modHead { display:flex; align-items:center; justify-content:space-between; font-size:13px; }
+  .modRow .modName { font-weight:700; }
+  .modRow .modName::before { content:''; display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:8px; background:var(--subtle); vertical-align:middle; }
+  .modRow .modVal { font-family:var(--font-mono); font-size:12px; color:var(--muted); }
+  .modRow.hasWarning .modVal { color:var(--warn); }
+  .modRow.hasWarning .modName::before { background:var(--warn); }
+  .modRow.isBanned { border-color: rgba(255,72,72,.4); background:rgba(255,72,72,.06); }
+  .modRow.isBanned .modVal { color:var(--danger); font-weight:700; }
+  .modRow.isBanned .modName::before { background:var(--danger); }
+  .modRow .modSub { font-size:11.5px; color:var(--subtle); line-height:1.5; margin-top:6px; }
 
   .queueItem { border:1px solid rgba(167,139,250,.35); background:rgba(167,139,250,.05); border-radius:10px; padding:12px; margin-bottom:10px; }
   .queueItem img.qThumb { max-width:140px; border-radius:8px; filter: blur(14px); display:block; margin-bottom:8px; }
@@ -92,8 +105,11 @@
   .proofLog .entry .human-tag { color:var(--human); }
   .proofLog .entry .img-tag { color:var(--info); }
 
-  .banBanner { background:rgba(255,72,72,.12); border:1px solid rgba(255,72,72,.4); border-radius:10px; padding:12px; font-size:13px; margin-top:12px; display:none; }
+  .banBanner { background:rgba(255,72,72,.12); border:1px solid rgba(255,72,72,.4); border-radius:10px; padding:12px; font-size:13px; margin-bottom:12px; display:none; line-height:1.55; }
   .banBanner.show { display:block; }
+  .banBanner code { color:var(--text); }
+
+  .imgWarnNote { background:rgba(255,174,0,.10); border:1px solid rgba(255,174,0,.4); border-radius:8px; padding:7px 10px; font-size:12px; margin-top:8px; color:var(--warn); line-height:1.5; }
 
   .architectureNote { font-size:12px; color:var(--muted); line-height:1.6; }
   .architectureNote b { color:var(--text); }
@@ -139,6 +155,7 @@
           <div id="tabImgBtn" class="tabBtn">🖼️ Image</div>
         </div>
         <div id="tabText" class="tabPane active">
+          <div id="banBannerText" class="banBanner"></div>
           <div id="chatMessages" class="chatMessages"></div>
           <div class="inputRow">
             <input id="chatInput" type="text" placeholder="Type a message and press Send…" disabled />
@@ -146,24 +163,34 @@
           </div>
         </div>
         <div id="tabImg" class="tabPane">
+          <div id="banBannerImage" class="banBanner"></div>
           <div id="imgMessages" class="chatMessages"></div>
-          <div id="dropzone" class="dropzone">Click or drop an image — analyzed on-device via the SDK<input id="fileInput" type="file" accept="image/*" /></div>
+          <div id="dropzone" class="dropzone"><span id="dropzoneLabel">Click or drop an image — analyzed on-device via the SDK</span><input id="fileInput" type="file" accept="image/*" /></div>
         </div>
-        <div id="banBanner" class="banBanner">3-warning cap reached on text — <code>guard.isBlocked('text')</code> is now true.</div>
       </div>
 
       <div class="panel">
         <div class="panelTitle">Step 3 — Human Review Queue <span id="queueCount" style="color:var(--human)">0 pending</span></div>
         <div id="queueList"><div class="queueEmpty">No ambiguous cases pending.</div></div>
+        <div class="note">Confirming here only logs a human-reviewed <code>WARNED_BY_HUMAN</code> decision for the audit trail — per the SDK's design, it never counts as a strike. Only an automated <code>BLOCKED</code> result advances a modality's warnings or bans; everything below is fully automated, never human-triggered.</div>
       </div>
 
       <div class="panel">
         <div class="panelTitle">Enforcement Status — from <code>guard.getStats()</code></div>
         <div class="statusGrid">
           <div class="statBox"><div class="num" id="statChecked">0</div><div class="lbl">Checked</div></div>
-          <div class="statBox warnState"><div class="num" id="statWarnings">0 / 3</div><div class="lbl">Warnings</div></div>
           <div class="statBox blockState"><div class="num" id="statBlocked">0</div><div class="lbl">Blocked</div></div>
           <div class="statBox humanState"><div class="num" id="statPending">0</div><div class="lbl">Pending Review</div></div>
+        </div>
+        <div class="modalityStatus">
+          <div class="modRow" id="modRowText">
+            <div class="modHead"><span class="modName">Text</span><span class="modVal" id="modValText">0 / 3 warnings</span></div>
+            <div class="modSub" id="modSubText" hidden></div>
+          </div>
+          <div class="modRow" id="modRowImage">
+            <div class="modHead"><span class="modName">Image</span><span class="modVal" id="modValImage">0 / 2 warnings</span></div>
+            <div class="modSub" id="modSubImage" hidden></div>
+          </div>
         </div>
       </div>
 
@@ -174,6 +201,8 @@
 
       <div class="panel architectureNote">
         <b>What changed from v3:</b> this page has zero detection logic. Every score, threshold check, review routing, warning count, and proof hash comes from a single imported <code>SifEdge</code> instance. This file is purely presentation — swap it for any UI and the underlying behavior (including the private-channel hard gate) stays identical, because it lives in the SDK, not in a page's script tag.
+        <br><br>
+        <b>About the ban you'll see here:</b> this demo doesn't set <code>backendUrl</code>, so it runs the SDK's local-fallback mode — hitting a modality's warning threshold blocks it until this page reloads, with no real timer. The full <code>1h → 24h → 1 month → permanent</code> ladder with timed, cross-session suspensions needs a connected backend; see <a href="../server/" style="color:var(--ok)">server/</a> and the README's "Warnings &amp; suspension" section for that version.
       </div>
     </div>
   </div>
@@ -189,37 +218,82 @@
   const modelText = document.getElementById('modelText');
   const modelStates = document.getElementById('modelStates');
   const proofLog = document.getElementById('proofLog');
-  const banBanner = document.getElementById('banBanner');
+  const banBannerText = document.getElementById('banBannerText');
+  const banBannerImage = document.getElementById('banBannerImage');
+  const modRowText = document.getElementById('modRowText');
+  const modValText = document.getElementById('modValText');
+  const modSubText = document.getElementById('modSubText');
+  const modRowImage = document.getElementById('modRowImage');
+  const modValImage = document.getElementById('modValImage');
+  const modSubImage = document.getElementById('modSubImage');
   const ctxPublic = document.getElementById('ctxPublic');
   const ctxPrivate = document.getElementById('ctxPrivate');
   const privateNotice = document.getElementById('privateNotice');
   const queueList = document.getElementById('queueList');
   const queueCount = document.getElementById('queueCount');
   const dropzone = document.getElementById('dropzone');
+  const dropzoneLabel = document.getElementById('dropzoneLabel');
   const fileInput = document.getElementById('fileInput');
+  const DROPZONE_DEFAULT_TEXT = dropzoneLabel.textContent;
   const tabTextBtn = document.getElementById('tabTextBtn');
   const tabImgBtn = document.getElementById('tabImgBtn');
   const tabText = document.getElementById('tabText');
   const tabImg = document.getElementById('tabImg');
   const statChecked = document.getElementById('statChecked');
-  const statWarnings = document.getElementById('statWarnings');
   const statBlocked = document.getElementById('statBlocked');
   const statPending = document.getElementById('statPending');
 
   const pendingDom = new Map(); // reviewId -> { itemEl, msgDiv }
 
+  // Populated by onSuspension(modality, tier, bannedUntil) — the SDK's one
+  // callback for every fresh ban, at any tier. This demo never sets
+  // backendUrl, so it only ever sees the SDK's local-fallback signal: tier
+  // is always the '1h' stand-in and bannedUntil is always null (no real
+  // timer without a backend to persist one — see the SDK's own docstring).
+  // Stored per modality so each status row can show what actually fired.
+  const suspensionInfo = { text: null, audio: null, image: null };
+
+  // modKey: 'text' | 'image'. rowEl/valEl/subEl: that modality's status row.
+  // bannerEl: the persistent banner shown inside that modality's own tab.
+  function refreshModalityStatus(modKey, rowEl, valEl, subEl, bannerEl) {
+    const m = guard.getStats().modalities[modKey];
+    rowEl.classList.toggle('hasWarning', !m.isBanned && m.warningCount > 0);
+    rowEl.classList.toggle('isBanned', m.isBanned);
+    if (m.isBanned) {
+      const info = suspensionInfo[modKey];
+      const tier = info?.tier ?? '1h';
+      valEl.textContent = info?.bannedUntil
+        ? `${tier} — until ${new Date(info.bannedUntil).toLocaleTimeString()}`
+        : `${tier} signal — no real timer`;
+      subEl.hidden = false;
+      subEl.textContent = info?.bannedUntil
+        ? `Suspended (${tier}) — guard.check${modKey === 'image' ? 'Image' : 'Text'}() rejects locally until it expires, no model call.`
+        : `Blocked locally until this page reloads (local-fallback mode: no backendUrl configured here, so onSuspension fired '${tier}' as a stand-in signal with no real duration to time out — see the note at the bottom of this page).`;
+      bannerEl.classList.add('show');
+      bannerEl.innerHTML = `🚫 <b>${modKey === 'image' ? 'Image' : 'Text'} suspended</b> — ${m.warningCount} / ${m.maxWarnings} threshold reached. Further <code>guard.check${modKey === 'image' ? 'Image' : 'Text'}()</code> calls return <code>null</code> immediately, no model call, until ${info?.bannedUntil ? 'the suspension expires' : 'this page reloads (no connected backend)'}.`;
+    } else {
+      valEl.textContent = `${m.warningCount} / ${m.maxWarnings} warnings`;
+      subEl.hidden = true;
+      bannerEl.classList.remove('show');
+    }
+    return m;
+  }
+
   function refreshStats() {
     const s = guard.getStats();
-    const text = s.modalities.text; // this demo's chat tab only shows the text modality's counter
     statChecked.textContent = s.checked;
-    statWarnings.textContent = `${text.warningCount} / ${text.maxWarnings}`;
     statBlocked.textContent = s.blocked;
     statPending.textContent = s.pendingReview;
     queueCount.textContent = `${s.pendingReview} pending`;
-    if (text.isBanned) {
-      banBanner.classList.add('show');
-      chatInput.disabled = true; btnSend.disabled = true;
-    }
+
+    const text = refreshModalityStatus('text', modRowText, modValText, modSubText, banBannerText);
+    const image = refreshModalityStatus('image', modRowImage, modValImage, modSubImage, banBannerImage);
+
+    if (text.isBanned) { chatInput.disabled = true; btnSend.disabled = true; }
+    dropzoneLabel.textContent = image.isBanned
+      ? 'Image is suspended — checks are rejected locally, no model call'
+      : DROPZONE_DEFAULT_TEXT;
+    dropzone.classList.toggle('isBanned', image.isBanned);
   }
 
   function logLine(r) {
@@ -236,7 +310,10 @@
     channelContext: 'public',
     onDecision: (r) => { logLine(r); refreshStats(); },
     onPendingReview: (item) => addToQueue(item),
-    onSuspension: () => refreshStats(),
+    onSuspension: (modality, tier, bannedUntil) => {
+      suspensionInfo[modality] = { tier, bannedUntil };
+      refreshStats();
+    },
   });
 
   guard.ready().then(() => {
@@ -286,11 +363,18 @@
   chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleSend(); });
 
   // ---- image ----
-  dropzone.addEventListener('click', () => fileInput.click());
-  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+  dropzone.addEventListener('click', () => { if (!guard.isBlocked('image')) fileInput.click(); });
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); if (!guard.isBlocked('image')) dropzone.classList.add('drag'); });
   dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
-  dropzone.addEventListener('drop', (e) => { e.preventDefault(); dropzone.classList.remove('drag'); if (e.dataTransfer.files[0]) handleImage(e.dataTransfer.files[0]); });
-  fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleImage(fileInput.files[0]); fileInput.value=''; });
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault(); dropzone.classList.remove('drag');
+    if (guard.isBlocked('image')) return; // mirrors the SDK's own gate — no point invoking checkImage, it would just return null
+    if (e.dataTransfer.files[0]) handleImage(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0] && !guard.isBlocked('image')) handleImage(fileInput.files[0]);
+    fileInput.value = '';
+  });
 
   function addImgMessage(blobUrl, decision, score, extraClass='') {
     const div = document.createElement('div');
@@ -304,10 +388,24 @@
     const result = await guard.checkImage(file);
     if (result) {
       // result.shouldBlur (not just decision === 'BLOCKED') is what actually
-      // drives the blur — it's set on every BLOCKED image instantly, even
-      // on the very first offense, independent of the warning counter.
+      // drives the blur — it's set on every BLOCKED image instantly, at any
+      // tier, not just the first offense, independent of the warning counter.
       const div = addImgMessage(result.blobUrl, result.decision, result.score, result.shouldBlur ? 'blocked' : result.decision === 'PENDING_REVIEW' ? 'pending' : '');
       if (result.reviewId) pendingDom.set(result.reviewId, { msgDiv: div });
+
+      // By the time checkImage() resolves, its onDecision callback has
+      // already run (see src/sifedge.js _route), so getStats() here already
+      // reflects this exact decision — image's own 2-warning threshold,
+      // independent of text's.
+      if (result.shouldBlur) {
+        const image = guard.getStats().modalities.image;
+        const note = document.createElement('div');
+        note.className = 'imgWarnNote';
+        note.textContent = image.isBanned
+          ? `Image suspended — ${image.warningCount} / ${image.maxWarnings} threshold reached.`
+          : `⚠️ ${image.warningCount} / ${image.maxWarnings} — the next BLOCKED image will suspend this modality.`;
+        div.appendChild(note);
+      }
     }
   }
 
@@ -317,9 +415,12 @@
     const el = document.createElement('div');
     el.className = 'queueItem';
     el.innerHTML = `<div class="qMeta">[${item.modality}] score: ${item.score.toFixed(3)} — review band</div>
-      <div class="queueActions"><button class="small">Confirm as warning</button><button class="small ghost">Dismiss (allow)</button></div>`;
+      <div class="queueActions"><button class="small">Confirm (audit log only)</button><button class="small ghost">Dismiss (allow)</button></div>`;
     const [confirmBtn, dismissBtn] = el.querySelectorAll('button');
     confirmBtn.addEventListener('click', async () => {
+      // 'confirm' never counts toward that modality's warnings or bans — see
+      // src/sifedge.js resolveReview(). It only logs a WARNED_BY_HUMAN
+      // decision; refreshStats() below reflects that the counters don't move.
       await guard.resolveReview(item.id, 'confirm');
       el.remove(); refreshQueueEmpty();
       const dom = pendingDom.get(item.id);
