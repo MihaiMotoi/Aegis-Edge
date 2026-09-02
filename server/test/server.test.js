@@ -22,7 +22,7 @@ function validDecisionPayload(overrides = {}) {
     score: 0.1,
     inputHash: 'a'.repeat(64),
     proofHash: 'b'.repeat(64),
-    policyId: 'AEGIS-TEXT-POL-02',
+    policyId: 'SIFEDGE-TEXT-POL-02',
     ...overrides,
   };
 }

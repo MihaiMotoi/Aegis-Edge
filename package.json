@@ -1,11 +1,11 @@
 {
-  "name": "aegis-edge",
+  "name": "sifedge",
   "version": "0.1.0",
   "description": "On-device content safety for chat, images, and voice. Runs entirely in the browser — no content ever leaves the user's device.",
   "type": "module",
-  "main": "src/aegis-edge.js",
+  "main": "src/sifedge.js",
   "exports": {
-    ".": "./src/aegis-edge.js"
+    ".": "./src/sifedge.js"
   },
   "files": [
     "src/",
@@ -35,7 +35,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MihaiMotoi/Aegis-Edge.git"
+    "url": "git+https://github.com/MihaiMotoi/SifEdge.git"
   },
   "engines": {
     "node": ">=18"

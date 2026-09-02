@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { AegisEdge } from '../src/aegis-edge.js';
+import { SifEdge } from '../src/sifedge.js';
 
 /**
  * The constructor always kicks off _loadModels(), which dynamically imports
@@ -18,7 +18,7 @@ import { AegisEdge } from '../src/aegis-edge.js';
  * SDK grows more tests like this.
  */
 function createGuard(opts = {}) {
-  const guard = new AegisEdge(opts);
+  const guard = new SifEdge(opts);
   guard._readyPromise.catch(() => {});
   return guard;
 }
@@ -185,8 +185,8 @@ describe('model swapping — _resolveModelSpec', () => {
 
   test('a Hugging Face Hub id (with or without an org prefix) is loaded from the Hub — no local_files_only', () => {
     const guard = createGuard();
-    assert.deepEqual(guard._resolveModelSpec('text', 'organizatie/modelul-meu'), {
-      id: 'organizatie/modelul-meu',
+    assert.deepEqual(guard._resolveModelSpec('text', 'my-org/my-model'), {
+      id: 'my-org/my-model',
       options: {},
     });
     // Single-segment ids (e.g. 'gpt2') are also valid Hub ids, not local paths.
@@ -213,9 +213,9 @@ describe('model swapping — _resolveModelSpec', () => {
 
   test('an override applies independently per model slot, leaving the others at their defaults', () => {
     const guard = createGuard();
-    const textSpec = guard._resolveModelSpec('text', 'organizatie/modelul-meu');
+    const textSpec = guard._resolveModelSpec('text', 'my-org/my-model');
     const imageSpec = guard._resolveModelSpec('image', 'default');
-    assert.equal(textSpec.id, 'organizatie/modelul-meu');
+    assert.equal(textSpec.id, 'my-org/my-model');
     assert.equal(imageSpec.id, 'onnx-community/nsfw_image_detection-ONNX');
   });
 });
@@ -229,19 +229,19 @@ describe('model swapping — _loadModels end-to-end (data: URL mock of transform
     // stand-in for it.
     const mockModuleSrc = `
       export function pipeline(task, id, options) {
-        globalThis.__aegisMockCalls.push({ task, id, options });
+        globalThis.__sifedgeMockCalls.push({ task, id, options });
         return Promise.resolve({ task, id });
       }
       export const env = {};
       export class RawImage {}
     `;
     const dataUrl = 'data:text/javascript,' + encodeURIComponent(mockModuleSrc);
-    globalThis.__aegisMockCalls = [];
+    globalThis.__sifedgeMockCalls = [];
 
-    const guard = new AegisEdge({
+    const guard = new SifEdge({
       transformersUrl: dataUrl,
       models: {
-        text: 'organizatie/modelul-meu', // Hub id -> loaded from Hub, no local_files_only
+        text: 'my-org/my-model', // Hub id -> loaded from Hub, no local_files_only
         image: 'default',
         audioTranscription: './local-models/whisper-custom', // local path -> local_files_only
         // audioEmotion omitted -> default
@@ -249,13 +249,13 @@ describe('model swapping — _loadModels end-to-end (data: URL mock of transform
     });
 
     await guard.ready();
-    const calls = globalThis.__aegisMockCalls;
-    delete globalThis.__aegisMockCalls;
+    const calls = globalThis.__sifedgeMockCalls;
+    delete globalThis.__sifedgeMockCalls;
 
     assert.equal(calls.length, 4);
 
     const textCall = calls.find(c => c.task === 'text-classification');
-    assert.equal(textCall.id, 'organizatie/modelul-meu');
+    assert.equal(textCall.id, 'my-org/my-model');
     assert.deepEqual(textCall.options, {});
 
     const imageCall = calls.find(c => c.task === 'image-classification');
@@ -274,19 +274,19 @@ describe('model swapping — _loadModels end-to-end (data: URL mock of transform
   test('with no `models` option at all, every slot loads its default id/options unchanged', async () => {
     const mockModuleSrc = `
       export function pipeline(task, id, options) {
-        globalThis.__aegisMockCalls2.push({ task, id, options });
+        globalThis.__sifedgeMockCalls2.push({ task, id, options });
         return Promise.resolve({ task, id });
       }
       export const env = {};
       export class RawImage {}
     `;
     const dataUrl = 'data:text/javascript,' + encodeURIComponent(mockModuleSrc);
-    globalThis.__aegisMockCalls2 = [];
+    globalThis.__sifedgeMockCalls2 = [];
 
-    const guard = new AegisEdge({ transformersUrl: dataUrl });
+    const guard = new SifEdge({ transformersUrl: dataUrl });
     await guard.ready();
-    const calls = globalThis.__aegisMockCalls2;
-    delete globalThis.__aegisMockCalls2;
+    const calls = globalThis.__sifedgeMockCalls2;
+    delete globalThis.__sifedgeMockCalls2;
 
     const textCall = calls.find(c => c.task === 'text-classification');
     assert.equal(textCall.id, 'multilingual-toxicity');

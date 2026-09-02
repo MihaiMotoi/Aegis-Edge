@@ -14,7 +14,7 @@ if (!email) {
 
 // Same DB_PATH resolution as db.js, so this always points at the live server
 // database unless DB_PATH is overridden (e.g. by tests).
-const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'aegis_edge.db');
+const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'sifedge.db');
 const db = new Database(dbPath);
 
 const moderator = db.prepare('SELECT id, email FROM moderators WHERE email = ?').get(email);

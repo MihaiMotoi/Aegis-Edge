@@ -12,7 +12,7 @@ const serverRoot = path.join(__dirname, '..');
 
 // Uses a real on-disk file (not ':memory:') because the script under test
 // runs as a separate process and must see the same database as this test.
-const dbPath = path.join(os.tmpdir(), `aegis-edge-reset-admin-test-${process.pid}-${Date.now()}.db`);
+const dbPath = path.join(os.tmpdir(), `sifedge-reset-admin-test-${process.pid}-${Date.now()}.db`);
 
 process.env.JWT_SECRET = 'test-jwt-secret';
 process.env.INGEST_API_KEY = 'test-ingest-key';

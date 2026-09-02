@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Aegis Edge SDK — Integrator Example</title>
+<title>SifEdge SDK — Integrator Example</title>
 <style>
   body { font-family: ui-sans-serif, system-ui, sans-serif; background:#0b0d10; color:#eee; padding:32px; max-width:720px; margin:0 auto; }
   h1 { font-size:18px; } h2 { font-size:13px; color:#9aa; margin-top:28px; }
@@ -15,10 +15,10 @@
 </style>
 </head>
 <body>
-<h1>Integrator example — wiring the standalone Aegis Edge SDK</h1>
+<h1>Integrator example — wiring the standalone SifEdge SDK</h1>
 <p style="color:#9aa;font-size:13px">
-  This page contains no Aegis Edge UI code of its own — every safety decision below comes from
-  <code>aegis-edge.js</code>, imported as a plain ES module.
+  This page contains no SifEdge UI code of its own — every safety decision below comes from
+  <code>sifedge.js</code>, imported as a plain ES module.
 </p>
 
 <h2>CHANNEL CONTEXT</h2>
@@ -38,7 +38,7 @@
 <div id="log"></div>
 
 <script type="module">
-  import { AegisEdge } from '../src/aegis-edge.js';
+  import { SifEdge } from '../src/sifedge.js';
 
   const log = document.getElementById('log');
   const reviews = document.getElementById('reviews');
@@ -48,7 +48,7 @@
 
   function line(s) { log.textContent = `[${new Date().toLocaleTimeString()}] ${s}\n` + log.textContent; }
 
-  const guard = new AegisEdge({
+  const guard = new SifEdge({
     channelContext: 'public',
     onDecision: (r) => line(`${r.modality} → ${r.decision} (score ${r.score.toFixed(3)}, proof ${r.proofHash.slice(0,12)}…, source ${r.source})`),
     onPendingReview: (item) => {

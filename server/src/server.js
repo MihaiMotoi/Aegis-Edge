@@ -17,7 +17,7 @@ app.use(express.json());
 const MAX_WARNINGS = 3;
 
 // ---------------------------------------------------------------------------
-// Public-facing ingest endpoint: called by the Aegis Edge SDK after it makes
+// Public-facing ingest endpoint: called by the SifEdge SDK after it makes
 // an on-device decision. Only ever receives: decision, score, hashes, modality,
 // policyId, channelContext, and an opaque userRef the integrator controls.
 // It NEVER receives raw text or image bytes — that is enforced client-side by
@@ -163,5 +163,5 @@ export default app;
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const PORT = process.env.PORT || 8787;
-  app.listen(PORT, () => console.log(`[aegis-edge-backend] listening on http://localhost:${PORT}`));
+  app.listen(PORT, () => console.log(`[sifedge-backend] listening on http://localhost:${PORT}`));
 }

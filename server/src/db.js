@@ -6,8 +6,8 @@ import crypto from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // DB_PATH lets tests point at ':memory:' or a throwaway file instead of the
-// real aegis_edge.db, so running the test suite never touches real data.
-const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'aegis_edge.db');
+// real sifedge.db, so running the test suite never touches real data.
+const dbPath = process.env.DB_PATH || path.join(__dirname, '..', 'sifedge.db');
 const db = new Database(dbPath);
 
 db.pragma('journal_mode = WAL');
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS user_status (
 // never rotated. A random one forces a first-login step either way.
 const existing = db.prepare('SELECT COUNT(*) AS c FROM moderators').get();
 if (existing.c === 0) {
-  const email = process.env.SEED_ADMIN_EMAIL || 'admin@aegis-edge.local';
+  const email = process.env.SEED_ADMIN_EMAIL || 'admin@sifedge.local';
   const password = process.env.SEED_ADMIN_PASSWORD || crypto.randomBytes(12).toString('base64url');
   const defaultHash = bcrypt.hashSync(password, 10);
   db.prepare('INSERT INTO moderators (email, password_hash, role) VALUES (?, ?, ?)')

@@ -1,6 +1,6 @@
 <div align="center">
 
-# Aegis Edge
+# SifEdge
 
 **On-device content safety for chat, images, and voice.**
 
@@ -8,7 +8,7 @@ Text, image, and audio moderation that runs entirely in the browser.
 No content ever leaves the user's device — only a decision and a hash do.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![CI](https://github.com/MihaiMotoi/Aegis-Edge/actions/workflows/test.yml/badge.svg)](https://github.com/MihaiMotoi/Aegis-Edge/actions/workflows/test.yml)
+[![CI](https://github.com/MihaiMotoi/SifEdge/actions/workflows/test.yml/badge.svg)](https://github.com/MihaiMotoi/SifEdge/actions/workflows/test.yml)
 
 </div>
 
@@ -16,7 +16,7 @@ No content ever leaves the user's device — only a decision and a hash do.
 
 ## What it does
 
-Aegis Edge checks user-generated content for abuse and returns a decision your
+SifEdge checks user-generated content for abuse and returns a decision your
 platform can act on:
 
 | Input | What's checked | Model |
@@ -63,8 +63,8 @@ cases are actioned without a human.
 ## Quick start
 
 ```bash
-git clone https://github.com/MihaiMotoi/Aegis-Edge.git
-cd Aegis-Edge
+git clone https://github.com/MihaiMotoi/SifEdge.git
+cd SifEdge
 
 # Downloads + converts + quantizes the multilingual text model (~5 min, one time)
 ./scripts/setup-models.sh
@@ -77,9 +77,9 @@ npx serve .
 ## Usage
 
 ```js
-import { AegisEdge } from './src/aegis-edge.js';
+import { SifEdge } from './src/sifedge.js';
 
-const guard = new AegisEdge({
+const guard = new SifEdge({
   channelContext: 'public',        // 'public' | 'private' — YOU set this, never the end user
   lowThreshold: 0.55,              // below -> allowed
   highThreshold: 0.90,             // above -> blocked; in between -> human review
@@ -108,7 +108,7 @@ is required once `backendUrl` is set — the server rejects unauthenticated
 decision reports, so anyone can't forge warnings against your users:
 
 ```js
-const guard = new AegisEdge({
+const guard = new SifEdge({
   channelContext: 'public',
   backendUrl: 'http://localhost:8787',
   userRef: 'user-abc123',      // opaque id you control — no PII required
@@ -122,9 +122,9 @@ const guard = new AegisEdge({
 Any of the four models can be overridden via the `models` option:
 
 ```js
-const guard = new AegisEdge({
+const guard = new SifEdge({
   models: {
-    text: 'organizatie/modelul-meu',   // Hugging Face Hub id or a local path
+    text: 'my-org/my-model',   // Hugging Face Hub id or a local path
     image: 'default',
     audioTranscription: 'default',
     audioEmotion: 'default',
@@ -144,7 +144,7 @@ automatic-speech-recognition, audio-classification).
 
 For text specifically, the model no longer has to be binary
 (`toxic`/`neutral`). If it's multi-label (e.g. a `toxic-bert`-style model
-with `insult`, `threat`, `obscene`, `identity_hate`, etc.), Aegis Edge takes
+with `insult`, `threat`, `obscene`, `identity_hate`, etc.), SifEdge takes
 the max score across the abuse labels and reports which one triggered it via
 `triggerLabel`. If the model does expose an explicit `toxic`/`toxicity`
 label, that's used directly instead. Either way, an explicit neutral label
@@ -191,7 +191,7 @@ the database, which would also wipe every existing decision and warning:
 
 ```bash
 cd server
-npm run reset-admin-password -- admin@aegis-edge.local
+npm run reset-admin-password -- admin@sifedge.local
 ```
 
 Point `DB_PATH` at your real database file if it isn't the default one next
@@ -226,7 +226,7 @@ Image NSFW detection and the audio vocal-tone signal are language-independent.
 
 - **Live/streaming video** — frame sampling of an ongoing call.
 - **External reporting integration** — for confirmed severe cases (e.g.
-  CSAM), your compliance process should be the recipient. Aegis Edge is
+  CSAM), your compliance process should be the recipient. SifEdge is
   designed to be the *trigger*, never the custodian of such evidence.
 - **A real production rate limiter** in front of the reference server. The
   server includes a basic in-memory login-attempt limiter, but a real

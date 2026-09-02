@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Aegis Edge — Audio Module Test</title>
+<title>SifEdge — Audio Module Test</title>
 <style>
   body { font-family: ui-sans-serif, system-ui, sans-serif; background:#0b0d10; color:#eee; padding:24px; max-width:760px; margin:0 auto; }
   h1 { font-size:18px; } h2 { font-size:13px; color:#9aa; text-transform:uppercase; letter-spacing:.05em; margin-top:24px; }
@@ -20,7 +20,7 @@
 </style>
 </head>
 <body>
-<h1>Aegis Edge — Audio Module (checkAudio)</h1>
+<h1>SifEdge — Audio Module (checkAudio)</h1>
 <p style="color:#9aa;font-size:13px">Record or upload a short clip. Transcription (Whisper) + text toxicity + vocal-tone all run locally via the SDK. Nothing is uploaded anywhere.</p>
 
 <div class="panel">
@@ -47,7 +47,7 @@
 </div>
 
 <script type="module">
-  import { AegisEdge } from '../src/aegis-edge.js';
+  import { SifEdge } from '../src/sifedge.js';
 
   const modelState = document.getElementById('modelState');
   const recBtn = document.getElementById('recBtn');
@@ -60,7 +60,7 @@
   const contentVal = document.getElementById('contentVal');
   const toneVal = document.getElementById('toneVal');
 
-  const guard = new AegisEdge({
+  const guard = new SifEdge({
     channelContext: 'public',
     onDecision: (r) => { if (r.modality !== 'audio') return; },
     onPendingReview: (item) => { decisionEl.textContent += `\n\n[sent to human review queue: score ${item.score.toFixed(3)}]`; },

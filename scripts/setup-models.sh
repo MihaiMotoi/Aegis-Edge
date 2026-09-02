@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Aegis Edge — model setup
+# SifEdge — model setup
 #
 # Downloads the multilingual toxicity model, exports it to ONNX, quantizes it
 # to INT8, and places it in ./models/ where the SDK expects it.
@@ -27,7 +27,7 @@ TMP_DIR="$(mktemp -d)"
 cleanup() { rm -rf "${TMP_DIR}"; }
 trap cleanup EXIT
 
-echo "==> Aegis Edge model setup"
+echo "==> SifEdge model setup"
 echo "    base model : ${BASE_MODEL}"
 echo "    output dir : ${MODEL_DIR}"
 echo

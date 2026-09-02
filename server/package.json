@@ -1,7 +1,7 @@
 {
-  "name": "aegis-edge-server",
+  "name": "sifedge-server",
   "version": "0.1.0",
-  "description": "Reference server for Aegis Edge: persistent review queue, moderator auth, warning/suspension state, and append-only decision log.",
+  "description": "Reference server for SifEdge: persistent review queue, moderator auth, warning/suspension state, and append-only decision log.",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

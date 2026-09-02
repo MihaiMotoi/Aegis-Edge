@@ -1,5 +1,5 @@
 /**
- * Aegis Edge SDK — standalone, on-device content safety engine.
+ * SifEdge SDK — standalone, on-device content safety engine.
  *
  * STANDALONE: this file is fully self-contained. It has no external
  * dependencies beyond @xenova/transformers, and shares no code with any
@@ -31,7 +31,7 @@
  *     this SDK has no accounts, no auth, no server.
  *   - Not an external-reporting integration (no NCMEC-equivalent wiring).
  *     Confirmed severe cases should trigger the integrator's own compliance
- *     process; Aegis Edge is the trigger, never the evidence custodian.
+ *     process; SifEdge is the trigger, never the evidence custodian.
  *   - Not live-video capable yet (audio and image are; live/streaming video
  *     frame sampling is the one modality still undone).
  *
@@ -56,9 +56,9 @@
  *
  * Usage:
  *   <script type="module">
- *     import { AegisEdge } from './aegis-edge.js';
+ *     import { SifEdge } from './sifedge.js';
  *
- *     const guard = new AegisEdge({
+ *     const guard = new SifEdge({
  *       channelContext: 'public',        // 'public' | 'private' — set by YOU, never by end user
  *       lowThreshold: 0.55,
  *       highThreshold: 0.90,
@@ -84,7 +84,7 @@
  * The text model is no longer assumed binary — see `_maxToxicityScore`.
  */
 
-export class AegisEdge {
+export class SifEdge {
   static DEFAULT_MODELS = {
     text: { id: 'multilingual-toxicity', options: { quantized: true, local_files_only: true } },
     image: { id: 'onnx-community/nsfw_image_detection-ONNX', options: {} },
@@ -106,7 +106,7 @@ export class AegisEdge {
     this.onPendingReview = opts.onPendingReview ?? (() => {});
     this.onWarningThresholdReached = opts.onWarningThresholdReached ?? (() => {});
 
-    // Optional: report every decision to a real Aegis Edge backend (see /backend).
+    // Optional: report every decision to a real SifEdge backend (see /backend).
     // Only decision + score + hashes + modality + userRef are ever sent — never
     // raw text or image bytes, which never leave this SDK instance.
     this.backendUrl = opts.backendUrl ?? null;
@@ -149,7 +149,7 @@ export class AegisEdge {
    * model works.
    */
   _resolveModelSpec(kind, override) {
-    const def = AegisEdge.DEFAULT_MODELS[kind];
+    const def = SifEdge.DEFAULT_MODELS[kind];
     if (override === undefined || override === null || override === 'default') {
       return { id: def.id, options: { ...def.options } };
     }
@@ -224,7 +224,7 @@ export class AegisEdge {
     const result = await this._textClassifier(text, { topk: null });
     const score = this._maxToxicityScore(result);
     const inputHash = await this._sha256Hex(text);
-    return this._route(score, inputHash, 'text', 'AEGIS-TEXT-POL-02', this._lastToxicLabel);
+    return this._route(score, inputHash, 'text', 'SIFEDGE-TEXT-POL-02', this._lastToxicLabel);
   }
 
   /**
@@ -246,7 +246,7 @@ export class AegisEdge {
     const result = await this._imgClassifier(img);
     const score = result.find(r => /nsfw|porn/i.test(r.label))?.score ?? result[0]?.score ?? 0;
     const inputHash = await this._sha256Hex(await fileOrBlob.arrayBuffer());
-    const decision = await this._route(score, inputHash, 'image', 'AEGIS-IMG-POL-01');
+    const decision = await this._route(score, inputHash, 'image', 'SIFEDGE-IMG-POL-01');
     decision.blobUrl = blobUrl; // convenience for integrators that want to render a thumbnail
     return decision;
   }
@@ -296,7 +296,7 @@ export class AegisEdge {
       : (toneLabel ? `tone:${toneLabel}` : null);
 
     const inputHash = await this._sha256Hex(await fileOrBlob.arrayBuffer());
-    const decision = await this._route(score, inputHash, 'audio', 'AEGIS-AUDIO-POL-01', triggerLabel);
+    const decision = await this._route(score, inputHash, 'audio', 'SIFEDGE-AUDIO-POL-01', triggerLabel);
     decision.blobUrl = blobUrl;
     decision.transcript = transcript;
     decision.contentScore = contentScore;
@@ -335,7 +335,7 @@ export class AegisEdge {
    * read as a toxicity score, in either shape.
    */
   _maxToxicityScore(labelResults) {
-    const candidates = labelResults.filter(r => !AegisEdge.NEUTRAL_LABELS.has(r.label.toLowerCase()));
+    const candidates = labelResults.filter(r => !SifEdge.NEUTRAL_LABELS.has(r.label.toLowerCase()));
 
     const explicitToxic = candidates.find(r => /^toxic(ity)?$/i.test(r.label));
     if (explicitToxic) {
@@ -399,7 +399,7 @@ export class AegisEdge {
   async _reportToBackend(payload) {
     if (!this.backendUrl || !this.userRef) return;
     if (!this.ingestApiKey) {
-      console.warn('[AegisEdge] backendUrl is set but ingestApiKey is missing — the server will reject this report. Continuing locally.');
+      console.warn('[SifEdge] backendUrl is set but ingestApiKey is missing — the server will reject this report. Continuing locally.');
       return;
     }
     try {
@@ -419,7 +419,7 @@ export class AegisEdge {
         }),
       });
     } catch (e) {
-      console.warn('[AegisEdge] backend report failed (continuing locally):', e.message);
+      console.warn('[SifEdge] backend report failed (continuing locally):', e.message);
     }
   }
 

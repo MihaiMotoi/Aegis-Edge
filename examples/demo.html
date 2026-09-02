@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Aegis Edge v4 — SDK-Powered Demo</title>
+<title>SifEdge v4 — SDK-Powered Demo</title>
 <style>
   :root {
     --bg: #0b0d10; --panel: #10141a; --card: #0f1318; --border: rgba(255,255,255,.12);
@@ -107,8 +107,8 @@
       <div class="brand">
         <div class="logo">S</div>
         <div class="brandText">
-          <div class="name">Aegis Edge v4</div>
-          <div class="tag">Same UI as v3 — now 100% driven by aegis-edge.js</div>
+          <div class="name">SifEdge v4</div>
+          <div class="tag">Same UI as v3 — now 100% driven by sifedge.js</div>
         </div>
       </div>
       <div id="modelStates" class="modelStates"><span class="dot"></span><span id="modelText">Loading SDK + models…</span></div>
@@ -173,14 +173,14 @@
       </div>
 
       <div class="panel architectureNote">
-        <b>What changed from v3:</b> this page has zero detection logic. Every score, threshold check, review routing, warning count, and proof hash comes from a single imported <code>AegisEdge</code> instance. This file is purely presentation — swap it for any UI and the underlying behavior (including the private-channel hard gate) stays identical, because it lives in the SDK, not in a page's script tag.
+        <b>What changed from v3:</b> this page has zero detection logic. Every score, threshold check, review routing, warning count, and proof hash comes from a single imported <code>SifEdge</code> instance. This file is purely presentation — swap it for any UI and the underlying behavior (including the private-channel hard gate) stays identical, because it lives in the SDK, not in a page's script tag.
       </div>
     </div>
   </div>
 </div>
 
 <script type="module">
-  import { AegisEdge } from '../src/aegis-edge.js';
+  import { SifEdge } from '../src/sifedge.js';
 
   const chatMessages = document.getElementById('chatMessages');
   const imgMessages = document.getElementById('imgMessages');
@@ -231,7 +231,7 @@
     proofLog.prepend(div);
   }
 
-  const guard = new AegisEdge({
+  const guard = new SifEdge({
     channelContext: 'public',
     onDecision: (r) => { logLine(r); refreshStats(); },
     onPendingReview: (item) => addToQueue(item),
