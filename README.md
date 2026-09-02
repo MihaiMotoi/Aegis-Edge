@@ -16,11 +16,14 @@ No content ever leaves the user's device — only a decision and a hash do.
 
 ## See it in action
 
-Type an insult, get an instant `BLOCKED` decision with a score. Drop in an
-ordinary photo, get `ALLOWED`. Every check lands in the decision log below,
-with a proof hash and the running warning count.
+Two insults get `BLOCKED` with warnings 1/3 and 2/3; a third automatically
+bans text for 1 hour, no human involved. Switch to images and one `BLOCKED`
+result blurs it instantly and warns that the next one bans image too — its
+own 2-warning threshold, completely unaffected by text's ban. Every check
+lands in the decision log below, with its own proof hash, and each modality
+keeps its own independent count.
 
-![SifEdge demo: a message gets checked and BLOCKED with a score, then an image gets checked and ALLOWED](examples/demo.gif)
+![SifEdge demo: three insulting messages escalate from warning 1/3 to warning 2/3 to an automatic 1-hour ban on text, then a BLOCKED image is instantly blurred with a warning that the next one bans it too — text and image tracked completely independently in the enforcement status panel](examples/demo.gif)
 
 *Illustrative — the UI and flow are real, but this GIF plays back sample
 decisions rather than live model output (recording live inference wasn't
