@@ -63,7 +63,7 @@
       if (reviews.querySelector('em')) reviews.innerHTML = '';
       reviews.appendChild(div);
     },
-    onWarningThresholdReached: () => line('*** 3-warning cap reached — SDK will now return null on every check ***'),
+    onSuspension: (modality, tier) => line(`*** ${modality} suspended (${tier}) — SDK will now return null on every ${modality} check ***`),
   });
 
   line('loading models…');

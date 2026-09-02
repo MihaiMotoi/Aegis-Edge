@@ -139,7 +139,7 @@ describe('GET /api/users/:userRef/ban-status', () => {
   });
 });
 
-describe('warning + ban flow (independent per modality)', () => {
+describe('warning + tier escalation flow (independent per modality)', () => {
   let token;
   before(async () => {
     const login = await request(app)
@@ -148,28 +148,49 @@ describe('warning + ban flow (independent per modality)', () => {
     token = login.body.token;
   });
 
-  async function blockThreeTimes(userRef, overrides = {}) {
-    let res;
-    for (let i = 0; i < 3; i++) {
-      res = await request(app)
-        .post('/api/decisions')
-        .set('x-api-key', 'test-ingest-key')
-        .send(validDecisionPayload({ userRef, decision: 'BLOCKED', score: 0.95, ...overrides }));
-      assert.equal(res.status, 201);
-    }
+  async function blockOnce(userRef, overrides = {}) {
+    const res = await request(app)
+      .post('/api/decisions')
+      .set('x-api-key', 'test-ingest-key')
+      .send(validDecisionPayload({ userRef, decision: 'BLOCKED', score: 0.95, ...overrides }));
+    assert.equal(res.status, 201);
     return res;
   }
 
-  test('three BLOCKED decisions on text ban only text, for ~1 hour, and reset that counter to 0', async () => {
-    const userRef = 'user-flow-1';
-    await blockThreeTimes(userRef);
+  async function blockNTimes(userRef, n, overrides = {}) {
+    let res;
+    for (let i = 0; i < n; i++) res = await blockOnce(userRef, overrides);
+    return res;
+  }
 
-    const status = await request(app)
+  function expireBan(userRef, modality) {
+    db.prepare(`UPDATE user_status SET ${modality}_banned_until = datetime('now', '-1 minute') WHERE user_ref = ?`).run(userRef);
+  }
+
+  test('text: 2 BLOCKED decisions only warn, the 3rd bans for ~1 hour and resets the counter', async () => {
+    const userRef = 'user-flow-text-warnings';
+    const first = await blockOnce(userRef);
+    assert.equal(first.body.justBanned, false);
+    const second = await blockOnce(userRef);
+    assert.equal(second.body.justBanned, false);
+
+    let status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.text.warningCount, 2);
+    assert.equal(status.body.modalities.text.isBanned, false);
+
+    const third = await blockOnce(userRef);
+    assert.equal(third.body.justBanned, true);
+    assert.equal(third.body.tier, '1h');
+
+    status = await request(app)
       .get(`/api/users/${userRef}/status`)
       .set('Authorization', `Bearer ${token}`);
     const text = status.body.modalities.text;
     assert.equal(text.warningCount, 0, 'the counter resets once a ban is applied');
-    assert.equal(text.banLevel, 1);
+    assert.equal(text.maxTierReached, '1h');
+    assert.equal(text.currentTier, '1h');
     assert.equal(text.isBanned, true);
     const msUntilBan = new Date(text.bannedUntil).getTime() - Date.now();
     assert.ok(msUntilBan > 55 * 60 * 1000 && msUntilBan <= 60 * 60 * 1000, `expected ~1h ban, got ${msUntilBan}ms`);
@@ -179,9 +200,43 @@ describe('warning + ban flow (independent per modality)', () => {
     assert.equal(status.body.modalities.image.isBanned, false);
   });
 
+  test('audio follows the same 3-warning -> 1h ban as text, independently of it', async () => {
+    const userRef = 'user-flow-audio';
+    await blockNTimes(userRef, 3, { modality: 'audio', policyId: 'SIFEDGE-AUDIO-POL-01' });
+
+    const status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.audio.maxTierReached, '1h');
+    assert.equal(status.body.modalities.audio.isBanned, true);
+    assert.equal(status.body.modalities.text.isBanned, false, 'banning audio must not touch text');
+    assert.equal(status.body.modalities.image.isBanned, false, 'banning audio must not touch image');
+  });
+
+  test('image: 1 BLOCKED decision only warns, the 2nd bans for ~1 hour (shorter threshold than text/audio)', async () => {
+    const userRef = 'user-flow-image';
+    const first = await blockOnce(userRef, { modality: 'image', policyId: 'SIFEDGE-IMG-POL-01' });
+    assert.equal(first.body.justBanned, false);
+
+    let status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.image.warningCount, 1);
+    assert.equal(status.body.modalities.image.isBanned, false);
+
+    const second = await blockOnce(userRef, { modality: 'image', policyId: 'SIFEDGE-IMG-POL-01' });
+    assert.equal(second.body.justBanned, true);
+    assert.equal(second.body.tier, '1h');
+
+    status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.image.isBanned, true);
+  });
+
   test('while a modality is banned, a new report for it is rejected (403) and not recorded', async () => {
     const userRef = 'user-flow-gate';
-    await blockThreeTimes(userRef);
+    await blockNTimes(userRef, 3);
 
     const res = await request(app)
       .post('/api/decisions')
@@ -190,49 +245,101 @@ describe('warning + ban flow (independent per modality)', () => {
     assert.equal(res.status, 403);
   });
 
-  test('escalates to a 24h ban once a modality hits 3 warnings again after its 1h ban expired, and that level is the ceiling', async () => {
+  test('once banned, the warning phase is gone for good: escalates 1h -> 24h -> 1month -> permanent, one BLOCKED at a time, no re-warning', async () => {
     const userRef = 'user-flow-escalate';
-    await blockThreeTimes(userRef);
+    await blockNTimes(userRef, 3);
+    let status = await request(app).get(`/api/users/${userRef}/status`).set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.text.maxTierReached, '1h');
 
-    // Simulate the 1h ban having already expired.
-    db.prepare("UPDATE user_status SET text_banned_until = datetime('now', '-1 minute') WHERE user_ref = ?").run(userRef);
-
-    const secondBanRes = await blockThreeTimes(userRef);
-    assert.equal(secondBanRes.body.justBanned, true);
-    assert.equal(secondBanRes.body.banLevel, 2);
-
-    let status = await request(app)
-      .get(`/api/users/${userRef}/status`)
-      .set('Authorization', `Bearer ${token}`);
+    // 1h -> 24h: a single BLOCKED after the 1h ban expires jumps straight to
+    // 24h, no warning counting in between.
+    expireBan(userRef, 'text');
+    const toDay = await blockOnce(userRef);
+    assert.equal(toDay.body.justBanned, true);
+    assert.equal(toDay.body.tier, '24h');
+    status = await request(app).get(`/api/users/${userRef}/status`).set('Authorization', `Bearer ${token}`);
     let text = status.body.modalities.text;
-    assert.equal(text.banLevel, 2);
+    assert.equal(text.warningCount, 0, 'no warning counter is used once past the first ban');
+    assert.equal(text.maxTierReached, '24h');
     let msUntilBan = new Date(text.bannedUntil).getTime() - Date.now();
     assert.ok(msUntilBan > 23.5 * 3600 * 1000 && msUntilBan <= 24 * 3600 * 1000, `expected ~24h ban, got ${msUntilBan}ms`);
 
-    // Expire the 24h ban too, then hit 3 more — must stay at level 2 (24h),
-    // never escalate past the ceiling.
-    db.prepare("UPDATE user_status SET text_banned_until = datetime('now', '-1 minute') WHERE user_ref = ?").run(userRef);
-    const thirdBanRes = await blockThreeTimes(userRef);
-    assert.equal(thirdBanRes.body.banLevel, 2, 'ban level must cap at 2 (24h) and never escalate past it');
+    // 24h -> 1month
+    expireBan(userRef, 'text');
+    const toMonth = await blockOnce(userRef);
+    assert.equal(toMonth.body.justBanned, true);
+    assert.equal(toMonth.body.tier, '1month');
+    status = await request(app).get(`/api/users/${userRef}/status`).set('Authorization', `Bearer ${token}`);
+    text = status.body.modalities.text;
+    assert.equal(text.maxTierReached, '1month');
+    msUntilBan = new Date(text.bannedUntil).getTime() - Date.now();
+    assert.ok(msUntilBan > 29.5 * 24 * 3600 * 1000 && msUntilBan <= 30 * 24 * 3600 * 1000, `expected ~1 month ban, got ${msUntilBan}ms`);
 
-    status = await request(app)
-      .get(`/api/users/${userRef}/status`)
-      .set('Authorization', `Bearer ${token}`);
-    msUntilBan = new Date(status.body.modalities.text.bannedUntil).getTime() - Date.now();
-    assert.ok(msUntilBan > 23.5 * 3600 * 1000 && msUntilBan <= 24 * 3600 * 1000, 'the repeat ban is still 24h, not longer');
+    // 1month -> permanent, no expiry date
+    expireBan(userRef, 'text');
+    const toPermanent = await blockOnce(userRef);
+    assert.equal(toPermanent.body.justBanned, true);
+    assert.equal(toPermanent.body.tier, 'permanent');
+    assert.equal(toPermanent.body.bannedUntil, null);
+    status = await request(app).get(`/api/users/${userRef}/status`).set('Authorization', `Bearer ${token}`);
+    text = status.body.modalities.text;
+    assert.equal(text.maxTierReached, 'permanent');
+    assert.equal(text.currentTier, 'permanent');
+    assert.equal(text.isBanned, true);
+    assert.equal(text.bannedUntil, null);
   });
 
-  test('audio follows the same 3 -> 1h escalation as text, independently of it', async () => {
-    const userRef = 'user-flow-audio';
-    await blockThreeTimes(userRef, { modality: 'audio', policyId: 'SIFEDGE-AUDIO-POL-01' });
+  test('permanent is the ceiling: it never expires and a further report is still rejected', async () => {
+    const userRef = 'user-flow-permanent-ceiling';
+    db.prepare(
+      `INSERT INTO user_status (user_ref, text_tier, text_banned_until) VALUES (?, 'permanent', NULL)`
+    ).run(userRef);
+
+    const res = await request(app)
+      .post('/api/decisions')
+      .set('x-api-key', 'test-ingest-key')
+      .send(validDecisionPayload({ userRef, decision: 'ALLOWED', score: 0.1 }));
+    assert.equal(res.status, 403);
 
     const status = await request(app)
       .get(`/api/users/${userRef}/status`)
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(status.body.modalities.audio.banLevel, 1);
-    assert.equal(status.body.modalities.audio.isBanned, true);
-    assert.equal(status.body.modalities.text.isBanned, false, 'banning audio must not touch text');
-    assert.equal(status.body.modalities.image.isBanned, false, 'banning audio must not touch image');
+    assert.equal(status.body.modalities.text.isBanned, true);
+    assert.equal(status.body.modalities.text.bannedUntil, null);
+  });
+
+  test('the three modalities keep fully independent tier histories for the same user', async () => {
+    const userRef = 'user-flow-independence';
+    await blockNTimes(userRef, 3, { modality: 'text' });
+    await blockNTimes(userRef, 2, { modality: 'image', policyId: 'SIFEDGE-IMG-POL-01' });
+    // audio gets only one warning, never banned.
+    await blockOnce(userRef, { modality: 'audio', policyId: 'SIFEDGE-AUDIO-POL-01' });
+
+    const status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.text.maxTierReached, '1h');
+    assert.equal(status.body.modalities.image.maxTierReached, '1h');
+    assert.equal(status.body.modalities.audio.maxTierReached, 'none');
+    assert.equal(status.body.modalities.audio.warningCount, 1);
+    assert.equal(status.body.modalities.audio.isBanned, false);
+  });
+
+  test('WARNED_BY_HUMAN reported directly to /api/decisions never counts toward warnings or bans', async () => {
+    const userRef = 'user-flow-human-decision';
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app)
+        .post('/api/decisions')
+        .set('x-api-key', 'test-ingest-key')
+        .send(validDecisionPayload({ userRef, decision: 'WARNED_BY_HUMAN', score: 0.7 }));
+      assert.equal(res.status, 201);
+      assert.equal(res.body.justBanned, false);
+    }
+    const status = await request(app)
+      .get(`/api/users/${userRef}/status`)
+      .set('Authorization', `Bearer ${token}`);
+    assert.equal(status.body.modalities.text.warningCount, 0);
+    assert.equal(status.body.modalities.text.maxTierReached, 'none');
   });
 
   test('a human "dismiss" on a pending review does not add a warning', async () => {
@@ -259,7 +366,7 @@ describe('warning + ban flow (independent per modality)', () => {
     assert.equal(status.body.modalities.text.warningCount, 0);
   });
 
-  test('a human "confirm" on a pending review does add a warning', async () => {
+  test('a human "confirm" on a pending review is logged but never counts as a warning (fully automated escalation only)', async () => {
     const userRef = 'user-flow-3';
     const ingest = await request(app)
       .post('/api/decisions')
@@ -275,10 +382,12 @@ describe('warning + ban flow (independent per modality)', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ action: 'confirm' });
     assert.equal(resolve.status, 200);
+    assert.equal(resolve.body.status.modalities.text.warningCount, 0);
 
     const status = await request(app)
       .get(`/api/users/${userRef}/status`)
       .set('Authorization', `Bearer ${token}`);
-    assert.equal(status.body.modalities.text.warningCount, 1);
+    assert.equal(status.body.modalities.text.warningCount, 0);
+    assert.equal(status.body.modalities.text.maxTierReached, 'none');
   });
 });

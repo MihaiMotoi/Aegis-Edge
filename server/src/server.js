@@ -15,13 +15,28 @@ app.use(cors(allowedOrigins.length ? { origin: allowedOrigins } : { origin: fals
 app.use(express.json());
 
 // Each modality (text, audio, image) has its own independent warning
-// counter and ban ladder — a suspension on one never affects the others.
-// 3 confirmed violations (an auto BLOCKED, or a human-confirmed
-// WARNED_BY_HUMAN from the review queue) bans that modality for 1 hour the
-// first time, then 24 hours on every escalation after that (ban_level caps
-// at 2, so the duration caps at 24h too — it never grows past that).
-const MODALITY_MAX_WARNINGS = 3;
-const BAN_DURATION_MS_BY_LEVEL = { 1: 60 * 60 * 1000, 2: 24 * 60 * 60 * 1000 };
+// counter and ban tier — a suspension on one never affects the others.
+// Only an automated BLOCKED decision ever counts — a human-confirmed
+// WARNED_BY_HUMAN from the review queue never does; that queue exists for
+// moderator judgment and an append-only audit trail, not for feeding this
+// ladder.
+//
+// WARNING PHASE (once per modality, only before it has ever been banned):
+// each BLOCKED increments that modality's counter. At its threshold (3 for
+// text/audio, 2 for image — image gets a shorter fuse) the counter resets
+// to 0 and the modality is banned at the '1h' tier.
+//
+// ESCALATION (once a modality has been banned at least once, the warning
+// phase never applies to it again): every further BLOCKED skips straight
+// to the next tier up from wherever the ratchet currently sits — no
+// counting, no warning. 'permanent' is the ceiling; it never escalates
+// further.
+const WARNING_THRESHOLDS = { text: 3, audio: 3, image: 2 };
+const TIER_AFTER = { none: '1h', '1h': '24h', '24h': '1month', '1month': 'permanent', permanent: 'permanent' };
+// '1month' is 30 days — a fixed duration, not calendar-month arithmetic.
+// 'permanent' has no duration at all: bannedUntil is always null for it,
+// and isBanned is unconditionally true once a modality reaches it.
+const TIER_DURATION_MS = { '1h': 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000, '1month': 30 * 24 * 60 * 60 * 1000 };
 const MODALITIES = ['text', 'audio', 'image'];
 
 // ---------------------------------------------------------------------------
@@ -76,12 +91,12 @@ app.post('/api/decisions', requireIngestKey, (req, res) => {
 
   const decisionId = info.lastInsertRowid;
 
-  // Both an auto BLOCKED and a human-confirmed WARNED_BY_HUMAN count as a
-  // confirmed violation toward that modality's warning counter — matches
-  // how the review queue has always treated a moderator's "confirm" action
-  // as equivalent to an automatic block.
+  // Only an automated BLOCKED decision ever counts toward warnings/bans —
+  // never a human-confirmed WARNED_BY_HUMAN (see the comment above
+  // WARNING_THRESHOLDS). A moderator's "confirm" action is logged below via
+  // the review-queue flow but deliberately has no effect here.
   let warnResult = null;
-  if (decision === 'BLOCKED' || decision === 'WARNED_BY_HUMAN') {
+  if (decision === 'BLOCKED') {
     warnResult = registerWarning(userRef, modality);
   }
 
@@ -94,7 +109,8 @@ app.post('/api/decisions', requireIngestKey, (req, res) => {
     decisionId,
     status: getUserStatus(userRef),
     justBanned: warnResult?.justBanned ?? false,
-    banLevel: warnResult?.banLevel ?? null,
+    tier: warnResult?.tier ?? null,
+    bannedUntil: warnResult?.bannedUntil ?? null,
   });
 });
 
@@ -130,14 +146,16 @@ app.post('/api/queue/:id/resolve', requireAuth, (req, res) => {
   db.prepare('UPDATE review_queue SET status = ?, resolved_by = ?, resolved_at = datetime(\'now\') WHERE id = ?')
     .run(status, req.moderator.sub, item.id);
 
+  // Logged to the decisions table either way, for the audit trail — but
+  // deliberately never calls registerWarning: a human "confirm" here is a
+  // moderator's judgment call, not an automated BLOCKED, and per design
+  // only automated BLOCKED decisions count toward warnings or bans.
   const decisionLabel = action === 'confirm' ? 'WARNED_BY_HUMAN' : 'ALLOWED_BY_HUMAN';
   db.prepare(`
     INSERT INTO decisions (external_id, user_ref, channel_context, modality, decision, score, input_hash, proof_hash, source, policy_id)
     SELECT NULL, user_ref, 'public', modality, ?, score, input_hash, proof_hash || '-human-' || ?, 'human', policy_id
     FROM decisions WHERE id = ?
   `).run(decisionLabel, item.id, item.decision_id);
-
-  if (action === 'confirm') registerWarning(item.user_ref, item.modality);
 
   res.json({ resolved: true, action, status: getUserStatus(item.user_ref) });
 });
@@ -184,50 +202,67 @@ function getUserStatus(userRef) {
   const row = ensureUserStatusRow(userRef);
   const modalities = {};
   for (const modality of MODALITIES) {
-    const bannedUntil = row[`${modality}_banned_until`];
-    const isBanned = !!bannedUntil && new Date(bannedUntil).getTime() > Date.now();
+    const tier = row[`${modality}_tier`];
+    const bannedUntilRaw = row[`${modality}_banned_until`];
+    // 'permanent' never has a bannedUntil to compare against — it's banned
+    // unconditionally, forever, until someone changes the row by hand.
+    const isBanned = tier === 'permanent'
+      ? true
+      : !!bannedUntilRaw && new Date(bannedUntilRaw).getTime() > Date.now();
     modalities[modality] = {
       warningCount: row[`${modality}_warning_count`],
-      maxWarnings: MODALITY_MAX_WARNINGS,
-      banLevel: row[`${modality}_ban_level`],
+      maxWarnings: WARNING_THRESHOLDS[modality],
+      // maxTierReached is the ratchet driving escalation — it persists even
+      // after the current suspension expires, so the next violation still
+      // jumps from the right place. currentTier is null once the active
+      // suspension has lapsed, even though maxTierReached still shows where
+      // the ratchet sits.
+      maxTierReached: tier,
+      currentTier: isBanned ? tier : null,
       isBanned,
-      // Once a ban expires it's still on the row (for the escalation-level
-      // check next time), but it's no longer "the" active ban — don't
-      // report a stale timestamp as if it were current.
-      bannedUntil: isBanned ? bannedUntil : null,
+      bannedUntil: isBanned && tier !== 'permanent' ? bannedUntilRaw : null,
     };
   }
   return { userRef: row.user_ref, modalities };
 }
 
-// Registers one confirmed violation (auto BLOCKED or human-confirmed
-// WARNED_BY_HUMAN) against a single modality. At 3 warnings the counter
-// resets to 0 and a ban is applied: 1 hour the first time (ban_level 0->1),
-// 24 hours every time after that (ban_level caps at 2, so does the
-// duration — see BAN_DURATION_MS_BY_LEVEL). Returns whether this call just
-// triggered a new ban, and at what level, so callers can react (e.g. fire
-// the SDK's onImageBanNotice at the 24h level).
+// Registers one confirmed AUTOMATED violation (decision === 'BLOCKED' —
+// see the comment above WARNING_THRESHOLDS for why WARNED_BY_HUMAN never
+// reaches this function) against a single modality.
+//
+//   - Never banned before (tier === 'none'): increments the warning
+//     counter. At that modality's threshold, the counter resets to 0 and
+//     the modality is banned at the '1h' tier.
+//   - Banned before at least once (tier !== 'none'): the warning phase
+//     never applies again — this one violation jumps straight from the
+//     current tier to TIER_AFTER[tier], no counting.
+//
+// Returns whether this call just applied a fresh ban and at which tier, so
+// callers can react (the SDK's onSuspension fires from this).
 function registerWarning(userRef, modality) {
   const row = ensureUserStatusRow(userRef);
   const countCol = `${modality}_warning_count`;
-  const levelCol = `${modality}_ban_level`;
+  const tierCol = `${modality}_tier`;
   const untilCol = `${modality}_banned_until`;
+  const currentTier = row[tierCol];
 
-  const newCount = row[countCol] + 1;
-  if (newCount < MODALITY_MAX_WARNINGS) {
-    db.prepare(`UPDATE user_status SET ${countCol} = ?, updated_at = datetime('now') WHERE user_ref = ?`)
-      .run(newCount, userRef);
-    return { justBanned: false };
+  if (currentTier === 'none') {
+    const newCount = row[countCol] + 1;
+    if (newCount < WARNING_THRESHOLDS[modality]) {
+      db.prepare(`UPDATE user_status SET ${countCol} = ?, updated_at = datetime('now') WHERE user_ref = ?`)
+        .run(newCount, userRef);
+      return { justBanned: false };
+    }
   }
 
-  const newLevel = Math.min(row[levelCol] + 1, 2);
-  const bannedUntil = new Date(Date.now() + BAN_DURATION_MS_BY_LEVEL[newLevel]).toISOString();
+  const nextTier = TIER_AFTER[currentTier];
+  const bannedUntil = nextTier === 'permanent' ? null : new Date(Date.now() + TIER_DURATION_MS[nextTier]).toISOString();
   db.prepare(`
     UPDATE user_status
-    SET ${countCol} = 0, ${levelCol} = ?, ${untilCol} = ?, updated_at = datetime('now')
+    SET ${countCol} = 0, ${tierCol} = ?, ${untilCol} = ?, updated_at = datetime('now')
     WHERE user_ref = ?
-  `).run(newLevel, bannedUntil, userRef);
-  return { justBanned: true, banLevel: newLevel, bannedUntil };
+  `).run(nextTier, bannedUntil, userRef);
+  return { justBanned: true, tier: nextTier, bannedUntil };
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));

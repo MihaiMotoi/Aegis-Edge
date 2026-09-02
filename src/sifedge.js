@@ -17,19 +17,29 @@
  *   - Routes every decision into one of three bands: ALLOWED, PENDING_REVIEW
  *     (ambiguous confidence — never auto-actioned), or BLOCKED (high
  *     confidence).
- *   - Each modality (text, audio, image) has its own independent 3-strike
- *     warning counter and ban ladder — a BLOCKED result (auto, or a
- *     human-confirmed PENDING_REVIEW) counts as a strike for that modality
- *     only. 3 strikes bans that modality for 1 hour; if it happens again
- *     after that ban expires, the next ban is 24 hours — the ceiling, it
- *     never escalates past that. While a modality is banned, checks on it
+ *   - Each modality (text, audio, image) has its own fully independent
+ *     warning-then-ban ladder. Only a literal automated BLOCKED result
+ *     counts toward it — a human-confirmed review (WARNED_BY_HUMAN) never
+ *     does, in either backend or local-fallback mode; the review queue
+ *     still exists and still gets logged, it just has zero effect on
+ *     warnings or bans.
+ *     Text and audio: 1st BLOCKED -> warning 1/3, 2nd -> warning 2/3, 3rd
+ *     -> automatic 1-hour ban (no warning phase left to give). Image is
+ *     shorter: 1st BLOCKED -> instant blur + a warning that the next
+ *     violation bans it, 2nd -> automatic 1-hour ban.
+ *     Once a modality has been banned at least once, its warning phase is
+ *     gone for good — every later BLOCKED result jumps straight to the
+ *     next tier, no warning, as soon as the current suspension has
+ *     expired: 1h -> 24h -> 1 month -> permanent. Permanent has no expiry
+ *     and is the ceiling; nothing escalates past it.
+ *     While a modality is suspended or permanently banned, checks on it
  *     return null immediately, same as the private-channel gate, and never
  *     invoke that modality's classifier. Real, cross-session ban durations
  *     require a connected backend (see `backendUrl` below); without one,
- *     each modality falls back to a simplified in-memory version — 3
- *     strikes blocks that modality until the page reloads, no timed
- *     expiry, no escalation — since a real duration can't mean anything
- *     without somewhere to persist it.
+ *     each modality falls back to a simplified in-memory version — hitting
+ *     that modality's warning threshold just blocks it until the page
+ *     reloads, no timed expiry, no escalation — since a real duration
+ *     can't mean anything without somewhere to persist it.
  *   - Every BLOCKED image result also carries `shouldBlur: true`, so an
  *     integrator can blur it in the UI immediately — on the first offense,
  *     independent of the warning counter or any ban.
@@ -77,11 +87,10 @@
  *       channelContext: 'public',        // 'public' | 'private' — set by YOU, never by end user
  *       lowThreshold: 0.55,
  *       highThreshold: 0.90,
- *       maxWarnings: 3,                        // strikes per modality, not shared
- *       onDecision: (result) => { ... },       // every checked item — result.shouldBlur is true on a BLOCKED image
+ *       maxWarnings: 3,                        // text/audio strikes per modality (image is always 2, fixed)
+ *       onDecision: (result) => { ... },       // every checked item — result.shouldBlur is true on a BLOCKED image, any tier
  *       onPendingReview: (item) => { ... },     // ambiguous items needing a human call
- *       onWarningThresholdReached: (modality) => { ... }, // that modality just got banned (1h, then 24h on repeat)
- *       onImageBanNotice: () => { ... }         // image hit its 24h ban — send a text-channel notice yourself
+ *       onSuspension: (modality, tier, bannedUntil) => { ... }, // fires on every new ban, any tier — '1h' | '24h' | '1month' | 'permanent'
  *     });
  *
  *     await guard.ready();                       // wait for models to load
@@ -115,6 +124,10 @@ export class SifEdge {
 
   static MODALITIES = ['text', 'audio', 'image'];
 
+  // Image's warning phase is shorter than text/audio's and not configurable
+  // via `maxWarnings` — 1 warning (with instant blur), then straight to ban.
+  static IMAGE_WARNING_THRESHOLD = 2;
+
   // How long a hydrated ban-status cache is trusted before a gate check
   // forces a fresh fetch. Bounds how long a ban applied by something other
   // than this SDK instance's own traffic can go unnoticed while the page
@@ -129,13 +142,11 @@ export class SifEdge {
     this.maxWarnings = opts.maxWarnings ?? 3;
     this.onDecision = opts.onDecision ?? (() => {});
     this.onPendingReview = opts.onPendingReview ?? (() => {});
-    // Fires once per new ban, named with the modality that just got banned
-    // (1h the first time for that modality, 24h on every repeat after).
-    this.onWarningThresholdReached = opts.onWarningThresholdReached ?? (() => {});
-    // Fires only when the IMAGE modality specifically reaches its 24h ban —
-    // the SDK never sends anything itself, this is just the signal to go
-    // notify the user through whatever text channel the integrator has.
-    this.onImageBanNotice = opts.onImageBanNotice ?? (() => {});
+    // Fires once per new ban, at every tier, with the modality, the tier
+    // just reached ('1h' | '24h' | '1month' | 'permanent'), and the expiry
+    // (null for 'permanent'). The SDK never sends anything itself — this is
+    // just the signal for the integrator to notify the user however they see fit.
+    this.onSuspension = opts.onSuspension ?? (() => {});
 
     // Optional: report every decision to a real SifEdge backend (see /backend).
     // Only decision + score + hashes + modality + userRef are ever sent — never
@@ -261,7 +272,9 @@ export class SifEdge {
   _isModalityBanned(modality) {
     if (this.backendUrl) {
       const status = this._modalityBanStatus[modality];
-      return !!status && status.isBanned && new Date(status.bannedUntil).getTime() > Date.now();
+      if (!status || !status.isBanned) return false;
+      if (status.bannedUntil == null) return true; // permanent — no expiry to compare against
+      return new Date(status.bannedUntil).getTime() > Date.now();
     }
     return this._localBlocked[modality];
   }
@@ -311,7 +324,8 @@ export class SifEdge {
       if (!m) continue;
       this._modalityBanStatus[modality] = {
         warningCount: m.warningCount,
-        banLevel: m.banLevel,
+        maxTierReached: m.maxTierReached,
+        currentTier: m.currentTier,
         isBanned: m.isBanned,
         bannedUntil: m.bannedUntil,
       };
@@ -547,28 +561,28 @@ export class SifEdge {
   }
 
   /**
-   * Absorbs a `{ status, justBanned, banLevel }` response from POST
+   * Absorbs a `{ status, justBanned, tier, bannedUntil }` response from POST
    * /api/decisions: refreshes the local ban-status cache (this snapshot is
    * exactly as fresh as one from _hydrateBanStatus, so it also resets the
    * cache-staleness clock — one less _ensureFreshBanStatus round-trip
    * needed on the next check), and — only on the turn a ban was *just*
-   * newly applied — fires onWarningThresholdReached for that modality, plus
-   * onImageBanNotice specifically when it's the image modality reaching its
-   * 24h ceiling (banLevel 2).
+   * newly applied, at whatever tier — fires onSuspension for that modality.
    */
   _handleBackendDecisionResult(modality, data) {
     this._applyServerStatus(data.status);
     this._banStatusFetchedAt = Date.now();
     if (data.justBanned) {
-      this.onWarningThresholdReached(modality);
-      if (modality === 'image' && data.banLevel === 2) this.onImageBanNotice();
+      this.onSuspension(modality, data.tier, data.bannedUntil ?? null);
     }
   }
 
   /**
-   * Resolve a PENDING_REVIEW item. action: 'confirm' (counts as a warning
-   * for that item's modality, same as an auto-BLOCKED result) or 'dismiss'
-   * (treated as allowed). Produces its own proof hash tagged source: 'human'.
+   * Resolve a PENDING_REVIEW item. action: 'confirm' or 'dismiss'. Neither
+   * counts toward that modality's warnings or bans — only a literal
+   * automated BLOCKED result does that (see the class docstring). 'confirm'
+   * still gets reported to the backend for the audit trail, tagged
+   * WARNED_BY_HUMAN, but the server never treats it as a strike. Produces
+   * its own proof hash tagged source: 'human'.
    */
   async resolveReview(id, action) {
     const entry = this._pending.get(id);
@@ -585,10 +599,7 @@ export class SifEdge {
     };
 
     if (action === 'confirm') {
-      this._registerWarning(entry.modality);
-      // Same warning as an auto-BLOCKED report, so it has to reach the same
-      // backend counter — otherwise a human-confirmed review would never
-      // count toward that modality's ban in backend mode.
+      // Audit-trail only — never a strike. See docstring above.
       this._reportHumanConfirmToBackend(entry, proofHash);
     }
     this.onDecision(result);
@@ -620,21 +631,27 @@ export class SifEdge {
     }
   }
 
+  /** Warning threshold for a modality: fixed at 2 for image, `this.maxWarnings` (default 3) for text/audio. */
+  _warningThreshold(modality) {
+    return modality === 'image' ? SifEdge.IMAGE_WARNING_THRESHOLD : this.maxWarnings;
+  }
+
   /**
    * Local-only fallback counter, used only without a connected backend (see
-   * the class docstring). No timed expiry, no escalation levels — a real
-   * duration needs somewhere to persist it, so 3 strikes just blocks that
-   * modality until the page reloads. In backend mode this is a no-op: the
-   * server is authoritative, and _handleBackendDecisionResult is what
+   * the class docstring). No timed expiry, no real tier ladder — a real
+   * duration needs somewhere to persist it, so hitting the threshold just
+   * blocks that modality until the page reloads, firing onSuspension with
+   * '1h' as a reasonable stand-in tier. In backend mode this is a no-op:
+   * the server is authoritative, and _handleBackendDecisionResult is what
    * reacts once it confirms a ban.
    */
   _registerWarning(modality) {
     if (this.backendUrl) return;
-    this._localWarnCount[modality] = Math.min(this._localWarnCount[modality] + 1, this.maxWarnings);
-    if (this._localWarnCount[modality] >= this.maxWarnings) {
+    const threshold = this._warningThreshold(modality);
+    this._localWarnCount[modality] = Math.min(this._localWarnCount[modality] + 1, threshold);
+    if (this._localWarnCount[modality] >= threshold) {
       this._localBlocked[modality] = true;
-      this.onWarningThresholdReached(modality);
-      if (modality === 'image') this.onImageBanNotice();
+      this.onSuspension(modality, '1h', null);
     }
   }
 
@@ -645,14 +662,15 @@ export class SifEdge {
       modalities[modality] = this.backendUrl
         ? {
             warningCount: this._modalityBanStatus[modality]?.warningCount ?? 0,
-            maxWarnings: this.maxWarnings,
-            banLevel: this._modalityBanStatus[modality]?.banLevel ?? 0,
+            maxWarnings: this._warningThreshold(modality),
+            maxTierReached: this._modalityBanStatus[modality]?.maxTierReached ?? 'none',
+            currentTier: this._modalityBanStatus[modality]?.currentTier ?? null,
             isBanned: this._isModalityBanned(modality),
             bannedUntil: this._modalityBanStatus[modality]?.bannedUntil ?? null,
           }
         : {
             warningCount: this._localWarnCount[modality],
-            maxWarnings: this.maxWarnings,
+            maxWarnings: this._warningThreshold(modality),
             isBanned: this._localBlocked[modality],
           };
     }

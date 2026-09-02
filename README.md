@@ -45,9 +45,10 @@ Every check returns one of three outcomes:
   to a human reviewer instead.
 - **`BLOCKED`** — high confidence, actioned automatically.
 
-Confirmed violations (auto-blocked, or human-confirmed from the review queue)
-count toward that modality's own warning counter and, past 3, suspend that
-modality specifically — see [Warnings & suspension](#warnings--suspension).
+Only a fully automated `BLOCKED` result ever counts toward warnings or bans —
+never a human-confirmed review. Each modality has its own warning-then-ban
+ladder that escalates on repeat offenses — see
+[Warnings & suspension](#warnings--suspension).
 
 ## Why it's different
 
@@ -76,46 +77,80 @@ cases are actioned without a human.
 
 ## Warnings & suspension
 
-Text, audio, and image each have their **own independent** 3-strike counter
-and ban ladder — there is no shared counter, and banning one modality never
-touches the other two.
+Text, audio, and image each have their **own independent** warning-then-ban
+ladder — there is no shared counter, and banning one modality never touches
+the other two. Only a fully automated `BLOCKED` decision counts toward it;
+a human-confirmed review from the moderation queue is logged for the audit
+trail but never counts as a strike and never bans anyone. Everything here is
+automated, on purpose.
 
-For a given modality: 3 confirmed violations (an auto `BLOCKED`, or a
-human-confirmed `WARNED_BY_HUMAN` from the review queue) ban **that
-modality** for **1 hour**, and reset its counter to 0. If it happens again
-after that ban expires, the next ban is **24 hours** — the ceiling; it never
-escalates past that. While a modality is banned, every check against it
+**The warning phase** applies only before a modality has ever been banned:
+
+| Modality | 1st `BLOCKED` | 2nd `BLOCKED` | 3rd `BLOCKED` |
+|---|---|---|---|
+| Text | warning 1/3 | warning 2/3 | automatic 1-hour ban |
+| Audio | warning 1/3 | warning 2/3 | automatic 1-hour ban |
+| Image | instant blur + warning that the next violation bans it | automatic 1-hour ban | — |
+
+Image's warning phase is shorter — one warning instead of two — because a
+blurred image is already a strong enough interim measure on its own.
+
+**Once a modality has been banned at least once, its warning phase is gone
+for good.** Every later `BLOCKED` result jumps straight to the next tier as
+soon as the current suspension has expired — no warnings, no counting:
+
+| Current tier (expired) | Next `BLOCKED` result |
+|---|---|
+| 1 hour | 24-hour ban |
+| 24 hours | 1-month ban |
+| 1 month | permanent ban (no expiry) |
+| Permanent | stays permanent — the ceiling |
+
+While a modality is suspended or permanently banned, every check against it
 returns `null` immediately, with no classifier call — the same hard gate as
 the private-channel check.
 
 ```js
-guard.isBlocked('text');   // true while text is currently banned
+guard.isBlocked('text');   // true while text is currently suspended or permanently banned
 guard.getStats().modalities.text;
-// -> { warningCount, maxWarnings, banLevel, isBanned, bannedUntil }
+// -> { warningCount, maxWarnings, maxTierReached, currentTier, isBanned, bannedUntil }
 ```
 
+`maxTierReached` is the ratchet driving escalation (`'none' | '1h' | '24h' |
+'1month' | 'permanent'`) — it persists even after the active suspension
+expires, so the next violation still jumps from the right place.
+`currentTier` is `null` once the active suspension has lapsed, even though
+`maxTierReached` still shows where the ratchet sits.
+
 **Images get one more thing:** every `BLOCKED` image result carries
-`shouldBlur: true` instantly, on the very first offense — independent of the
-warning counter or any ban — so you can blur it in your UI right away.
-Separately, when the *image* modality specifically reaches its 24-hour ban,
-`onImageBanNotice` fires so you know to notify the user; the SDK never sends
-anything itself, it only signals that a notice is due:
+`shouldBlur: true` instantly, at any tier, not just the first offense — so
+you can blur it in your UI right away, independent of the warning counter or
+any ban.
+
+**One callback covers every tier.** `onSuspension(modality, tier, bannedUntil)`
+fires each time a modality gets freshly banned, at whatever tier that is
+(`'1h' | '24h' | '1month' | 'permanent'`; `bannedUntil` is `null` for
+`'permanent'`). The SDK never sends anything itself — it only signals that a
+notice is due, and you decide how to reach the user:
 
 ```js
 const guard = new SifEdge({
-  onImageBanNotice: () => {
-    // send your own text-channel notice — SMS, email, in-app — however you reach this user
+  onSuspension: (modality, tier, bannedUntil) => {
+    // send your own notice — SMS, email, in-app — however you reach this user
   },
 });
 ```
 
-**Real, cross-session ban durations require a connected backend.** A 1-hour
-or 24-hour suspension has to survive a page reload or a closed tab, so it's
-stored server-side, per `userRef`, per modality (see [`server/`](server/) —
-the `user_status` table). Without `backendUrl` configured, the SDK falls
-back to a simplified, browser-memory-only version: 3 strikes blocks that
-modality until the page reloads, with no timed expiry and no escalation
-levels — a duration can't mean anything with nowhere to persist it.
+**Real, cross-session ban durations require a connected backend.** A
+suspension has to survive a page reload or a closed tab, so it's stored
+server-side, per `userRef`, per modality (see [`server/`](server/) — the
+`user_status` table, which tracks both the current warning count and the
+maximum tier ever reached). Without `backendUrl` configured, the SDK falls
+back to a simplified, browser-memory-only version: hitting a modality's
+warning threshold just blocks it until the page reloads, firing
+`onSuspension(modality, '1h', null)` as a stand-in signal — with no timed
+expiry and no real escalation, since a duration can't mean anything with
+nowhere to persist it.
 
 ## Quick start
 
@@ -140,20 +175,18 @@ const guard = new SifEdge({
   channelContext: 'public',        // 'public' | 'private' — YOU set this, never the end user
   lowThreshold: 0.55,              // below -> allowed
   highThreshold: 0.90,             // above -> blocked; in between -> human review
-  maxWarnings: 3,                  // strikes per modality — text, audio, and image count separately
+  maxWarnings: 3,                  // text/audio warnings before a ban — image is always 2, fixed
 
   onDecision: (r) => {
     // r = { decision, score, modality, proofHash, timestamp, source, triggerLabel, shouldBlur }
-    // shouldBlur is only ever present (true) on a BLOCKED image result.
+    // shouldBlur is only ever present (true) on a BLOCKED image result, at any tier.
   },
   onPendingReview: (item) => {
     // route to your reviewer UI; resolve with guard.resolveReview(item.id, 'confirm'|'dismiss')
   },
-  onWarningThresholdReached: (modality) => {
-    // that modality just got banned — 1h the first time, 24h on every repeat after
-  },
-  onImageBanNotice: () => {
-    // image specifically hit its 24h ban — send your own text-channel notice
+  onSuspension: (modality, tier, bannedUntil) => {
+    // that modality just got banned — tier is '1h' | '24h' | '1month' | 'permanent'
+    // bannedUntil is null for 'permanent'
   },
 });
 

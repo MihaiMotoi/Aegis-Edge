@@ -236,7 +236,7 @@
     channelContext: 'public',
     onDecision: (r) => { logLine(r); refreshStats(); },
     onPendingReview: (item) => addToQueue(item),
-    onWarningThresholdReached: () => refreshStats(),
+    onSuspension: () => refreshStats(),
   });
 
   guard.ready().then(() => {

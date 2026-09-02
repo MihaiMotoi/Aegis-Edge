@@ -104,7 +104,7 @@ describe('warning counter (no backend — local per-modality fallback)', () => {
     assert.equal(guard.getStats().pendingReview, 1);
   });
 
-  test('resolveReview("confirm") increments the modality\'s warning counter; "dismiss" does not', async () => {
+  test('resolveReview("confirm") never counts as a warning — only automated BLOCKED does', async () => {
     const guard = createGuard({ channelContext: 'public' });
     guard._textClassifier = mockTextClassifier(0.7);
 
@@ -114,29 +114,27 @@ describe('warning counter (no backend — local per-modality fallback)', () => {
 
     const r2 = await guard.checkText('b');
     await guard.resolveReview(r2.reviewId, 'confirm');
-    assert.equal(guard.getStats().modalities.text.warningCount, 1);
+    assert.equal(guard.getStats().modalities.text.warningCount, 0, 'a human confirm is never a strike, fully automated escalation only');
   });
 
-  test('the 3rd confirmed warning blocks that modality; further checks on it become no-ops', async () => {
-    let thresholdReachedModality = null;
+  test('the 3rd BLOCKED (of 3) bans that modality and fires onSuspension; further checks on it become no-ops', async () => {
+    let suspension = null;
     const guard = createGuard({
       channelContext: 'public',
       maxWarnings: 3,
-      onWarningThresholdReached: (modality) => { thresholdReachedModality = modality; },
+      onSuspension: (modality, tier, bannedUntil) => { suspension = { modality, tier, bannedUntil }; },
     });
-    // BLOCKED results are auto-confirmed warnings by design (see the SDK's
-    // module docstring), so three BLOCKED checks exercise the same
-    // _registerWarning() path as three resolveReview('confirm') calls.
     guard._textClassifier = mockTextClassifier(0.95);
 
     await guard.checkText('1');
     await guard.checkText('2');
     assert.equal(guard.isBlocked('text'), false);
+    assert.equal(suspension, null);
     await guard.checkText('3');
 
     assert.equal(guard.getStats().modalities.text.warningCount, 3);
     assert.equal(guard.isBlocked('text'), true);
-    assert.equal(thresholdReachedModality, 'text');
+    assert.deepEqual(suspension, { modality: 'text', tier: '1h', bannedUntil: null });
 
     const result = await guard.checkText('4');
     assert.equal(result, null, 'checks after the warning cap must be a no-op');
@@ -157,10 +155,10 @@ describe('per-modality independence (no backend — local fallback)', () => {
   });
 
   test('audio has its own independent 3-strike counter, same mechanism as text', async () => {
-    let thresholdReachedModality = null;
+    let suspendedModality = null;
     const guard = createGuard({
       channelContext: 'public',
-      onWarningThresholdReached: (modality) => { thresholdReachedModality = modality; },
+      onSuspension: (modality) => { suspendedModality = modality; },
     });
     guard._decodeAudio = async () => new Float32Array(10);
     guard._audioTranscriber = async () => ({ text: '' }); // no transcript -> content score stays 0
@@ -172,7 +170,7 @@ describe('per-modality independence (no backend — local fallback)', () => {
     await guard.checkAudio(fakeFile());
 
     assert.equal(guard.isBlocked('audio'), true);
-    assert.equal(thresholdReachedModality, 'audio');
+    assert.equal(suspendedModality, 'audio');
     assert.equal(guard.isBlocked('text'), false, 'banning audio must not touch text');
   });
 });
@@ -212,7 +210,7 @@ describe('modality gate — classifier never runs while banned', () => {
   });
 });
 
-describe('checkImage — shouldBlur and onImageBanNotice', () => {
+describe('checkImage — shouldBlur and onSuspension (image has a shorter, 2-strike threshold)', () => {
   test('a BLOCKED image result carries shouldBlur: true on the very first offense (before any ban)', async () => {
     const guard = createGuard({ channelContext: 'public', lowThreshold: 0.55, highThreshold: 0.9 });
     guard._imgClassifier = async () => [{ label: 'nsfw', score: 0.95 }];
@@ -234,38 +232,40 @@ describe('checkImage — shouldBlur and onImageBanNotice', () => {
     assert.equal(result.shouldBlur, undefined);
   });
 
-  test('onImageBanNotice fires once image reaches its local block threshold, not before', async () => {
-    let noticeCount = 0;
+  test('onSuspension fires on the 2nd BLOCKED image (its local threshold), not on the 1st', async () => {
+    let suspension = null;
     const guard = createGuard({
       channelContext: 'public',
       lowThreshold: 0.55,
       highThreshold: 0.9,
-      onImageBanNotice: () => { noticeCount++; },
+      onSuspension: (modality, tier, bannedUntil) => { suspension = { modality, tier, bannedUntil }; },
     });
     guard._imgClassifier = async () => [{ label: 'nsfw', score: 0.95 }];
     guard._RawImage = { fromURL: async () => ({}) };
 
-    await guard.checkImage(fakeFile());
-    assert.equal(noticeCount, 0);
-    await guard.checkImage(fakeFile());
-    assert.equal(noticeCount, 0);
-    await guard.checkImage(fakeFile());
-    assert.equal(noticeCount, 1);
+    const first = await guard.checkImage(fakeFile());
+    assert.equal(first.shouldBlur, true, 'shouldBlur fires on every BLOCKED image, not just the one that bans it');
+    assert.equal(suspension, null, 'image gets exactly one warning before its ban, unlike text/audio\'s three');
+    assert.equal(guard.isBlocked('image'), false);
+
+    const second = await guard.checkImage(fakeFile());
+    assert.equal(second.shouldBlur, true);
+    assert.deepEqual(suspension, { modality: 'image', tier: '1h', bannedUntil: null });
     assert.equal(guard.isBlocked('image'), true);
   });
 
-  test('onImageBanNotice does not fire for text or audio bans', async () => {
-    let noticeCount = 0;
+  test('onSuspension does not fire for image on a text or audio ban', async () => {
+    let suspendedModality = null;
     const guard = createGuard({
       channelContext: 'public',
-      onImageBanNotice: () => { noticeCount++; },
+      onSuspension: (modality) => { suspendedModality = modality; },
     });
     guard._textClassifier = mockTextClassifier(0.95);
     await guard.checkText('1');
     await guard.checkText('2');
     await guard.checkText('3');
     assert.equal(guard.isBlocked('text'), true);
-    assert.equal(noticeCount, 0);
+    assert.equal(suspendedModality, 'text');
   });
 });
 

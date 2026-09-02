@@ -51,27 +51,29 @@ CREATE TABLE IF NOT EXISTS moderators (
 CREATE TABLE IF NOT EXISTS user_status (
   user_ref TEXT PRIMARY KEY,
   text_warning_count INTEGER NOT NULL DEFAULT 0,
-  text_ban_level INTEGER NOT NULL DEFAULT 0,
+  text_tier TEXT NOT NULL DEFAULT 'none',
   text_banned_until TEXT,
   audio_warning_count INTEGER NOT NULL DEFAULT 0,
-  audio_ban_level INTEGER NOT NULL DEFAULT 0,
+  audio_tier TEXT NOT NULL DEFAULT 'none',
   audio_banned_until TEXT,
   image_warning_count INTEGER NOT NULL DEFAULT 0,
-  image_ban_level INTEGER NOT NULL DEFAULT 0,
+  image_tier TEXT NOT NULL DEFAULT 'none',
   image_banned_until TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `);
 
-// Migration: databases created before per-modality warnings/bans have a
+// Migration 1: databases created before per-modality warnings/bans have a
 // user_status table with only the old global columns (warning_count,
-// is_suspended, suspended_until). Add the new per-modality columns without
+// is_suspended, suspended_until). Add the per-modality columns without
 // touching those legacy columns or any existing row — CREATE TABLE IF NOT
 // EXISTS above is a no-op against them, so this has to run unconditionally
-// and be idempotent itself.
+// and be idempotent itself. text_tier/audio_tier/image_tier are handled
+// separately below (migration 2) since databases from the *previous*
+// per-modality scheme already have warning_count/banned_until but a
+// numeric ban_level (0/1/2) instead of a tier string.
 const MODALITY_STATUS_COLUMNS = ['text', 'audio', 'image'].flatMap((modality) => [
   [`${modality}_warning_count`, 'INTEGER NOT NULL DEFAULT 0'],
-  [`${modality}_ban_level`, 'INTEGER NOT NULL DEFAULT 0'],
   [`${modality}_banned_until`, 'TEXT'],
 ]);
 const existingUserStatusColumns = new Set(
@@ -80,6 +82,33 @@ const existingUserStatusColumns = new Set(
 for (const [columnName, columnDef] of MODALITY_STATUS_COLUMNS) {
   if (!existingUserStatusColumns.has(columnName)) {
     db.exec(`ALTER TABLE user_status ADD COLUMN ${columnName} ${columnDef}`);
+  }
+}
+
+// Migration 2: replaces the old numeric ban_level ratchet (0 = never
+// banned, 1 = has served a 1h ban, 2 = has served a 24h ban — the previous
+// scheme's ceiling) with the richer tier string this scheme needs
+// ('none' | '1h' | '24h' | '1month' | 'permanent'). Adds {modality}_tier
+// only where it doesn't already exist, and — critically — backfills it
+// from the old {modality}_ban_level column when that column is present, so
+// an existing ban ratchet isn't silently reset back to 'none' and made
+// more lenient than it should be. Databases that never had ban_level at
+// all (very old, pre-per-modality, or a brand new install using the
+// CREATE TABLE above) simply get 'none' for every row, correctly.
+for (const modality of ['text', 'audio', 'image']) {
+  const tierCol = `${modality}_tier`;
+  if (existingUserStatusColumns.has(tierCol)) continue;
+  db.exec(`ALTER TABLE user_status ADD COLUMN ${tierCol} TEXT NOT NULL DEFAULT 'none'`);
+
+  const banLevelCol = `${modality}_ban_level`;
+  if (existingUserStatusColumns.has(banLevelCol)) {
+    const LEVEL_TO_TIER = { 1: '1h', 2: '24h' };
+    const rows = db.prepare(`SELECT user_ref, ${banLevelCol} AS level FROM user_status WHERE ${banLevelCol} > 0`).all();
+    const updateTier = db.prepare(`UPDATE user_status SET ${tierCol} = ? WHERE user_ref = ?`);
+    for (const row of rows) {
+      const tier = LEVEL_TO_TIER[row.level];
+      if (tier) updateTier.run(tier, row.user_ref);
+    }
   }
 }
 
